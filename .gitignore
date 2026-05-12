@@ -1,0 +1,24 @@
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.a
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+vendor/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local config (not for version control)
+.claude/settings.local.json
