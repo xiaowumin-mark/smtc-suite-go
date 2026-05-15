@@ -2,9 +2,8 @@
 
 Go bindings for Windows System Media Transport Controls (SMTC), implemented with CGo and raw WinRT COM interop.
 
-Current release target: `v0.1.0` (unreleased). The monitor and control modules
-are usable; the create module is available for experimental MediaPlayer-backed
-SMTC publishing.
+Current release: `v0.1.0`. The monitor and control modules are usable; the
+create module is available for experimental MediaPlayer-backed SMTC publishing.
 
 ## Module Status
 
