@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,11 +15,16 @@ import (
 	"github.com/xiaowumin-mark/smtc-suite-go/pkg/smtc/monitor"
 )
 
-const coverDir = "testdata"
-
-var savedCovers = make(map[string]bool)
+var (
+	watchDuration = flag.Duration("duration", 60*time.Second, "how long to watch SMTC events")
+	coversDir     = flag.String("covers-dir", "testdata", "directory for saved cover files")
+	noCoverSave   = flag.Bool("no-cover-save", false, "disable saving cover artwork")
+	savedCovers   = make(map[string]bool)
+)
 
 func main() {
+	flag.Parse()
+
 	m, err := monitor.New(nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -28,13 +34,15 @@ func main() {
 
 	sessions := m.Sessions()
 	printSessions(sessions)
-	saveSessionCovers(sessions)
+	if !*noCoverSave {
+		saveSessionCovers(sessions)
+	}
 	if cur := m.CurrentSession(); cur != nil {
 		fmt.Printf("Current session: %s - %s\n", cur.MediaInfo.Title, cur.MediaInfo.Artist)
 	}
 
-	fmt.Println("Watching SMTC events for 60s. Start, pause, seek, or change tracks in a media app.")
-	timer := time.NewTimer(60 * time.Second)
+	fmt.Printf("Watching SMTC events for %s. Start, pause, seek, or change tracks in a media app.\n", *watchDuration)
+	timer := time.NewTimer(*watchDuration)
 	defer timer.Stop()
 	for {
 		select {
@@ -82,7 +90,9 @@ func printEvent(evt monitor.ManagerEvent) {
 	case monitor.ManagerEventSessionMediaChanged:
 		fmt.Printf("SessionMediaChanged: %s\n", evt.SessionID)
 		printEventSession(evt.Session)
-		saveEventCover(evt.Session)
+		if !*noCoverSave {
+			saveEventCover(evt.Session)
+		}
 	}
 }
 
@@ -99,6 +109,8 @@ func printSession(prefix string, s smtc.SessionInfo) {
 	fmt.Printf("%sAlbum:    %s\n", prefix, s.MediaInfo.AlbumTitle)
 	fmt.Printf("%sCover:    %t (%d bytes, sha256=%s)\n", prefix, s.MediaInfo.ThumbnailAvailable, len(s.MediaInfo.ThumbnailData), shortHash(s.MediaInfo.ThumbnailHash))
 	fmt.Printf("%sStatus:   %s\n", prefix, s.PlaybackStatus)
+	fmt.Printf("%sMode:     type=%d repeat=%s shuffle=%t rate=%.2f\n", prefix, s.PlaybackType, s.AutoRepeatMode, s.IsShuffleActive, s.PlaybackRate)
+	fmt.Printf("%sControls: play=%t pause=%t toggle=%t next=%t prev=%t seek=%t rate=%t\n", prefix, s.PlaybackControls.Play, s.PlaybackControls.Pause, s.PlaybackControls.PlayPauseToggle, s.PlaybackControls.Next, s.PlaybackControls.Previous, s.PlaybackControls.PlaybackPosition, s.PlaybackControls.PlaybackRate)
 	fmt.Printf("%sPosition: %v / %v\n", prefix, s.TimelineInfo.Position.Round(time.Second), s.TimelineInfo.EndTime.Round(time.Second))
 }
 
@@ -130,13 +142,13 @@ func saveCover(info smtc.MediaInfo) {
 		return
 	}
 
-	if err := os.MkdirAll(coverDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "Save cover: create %s failed: %v\n", coverDir, err)
+	if err := os.MkdirAll(*coversDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "Save cover: create %s failed: %v\n", *coversDir, err)
 		return
 	}
 
 	name := fmt.Sprintf("cover-%s%s", shortHash(info.ThumbnailHash), imageExt(info.ThumbnailData))
-	path := filepath.Join(coverDir, name)
+	path := filepath.Join(*coversDir, name)
 	if err := os.WriteFile(path, info.ThumbnailData, 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "Save cover: write %s failed: %v\n", path, err)
 		return

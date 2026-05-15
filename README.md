@@ -2,6 +2,10 @@
 
 Go bindings for Windows System Media Transport Controls (SMTC), implemented with CGo and raw WinRT COM interop.
 
+Current release target: `v0.1.0` (unreleased). The monitor and control modules
+are usable; the create module is available for experimental MediaPlayer-backed
+SMTC publishing.
+
 ## Module Status
 
 | Module | Status | Notes |
@@ -34,6 +38,14 @@ Go bindings for Windows System Media Transport Controls (SMTC), implemented with
 - Create currently enables only common buttons: play, pause, stop, next, and previous.
 - There are no automated WinRT integration tests yet; examples are the primary runtime verification path.
 - See `docs/com-runtime-plan.md` for the planned dedicated apartment runtime refactor.
+
+## Verified Runtime
+
+The monitor, control, and create examples have been manually verified on a real
+Windows desktop after the current raw COM vtable and CGo ABI changes. For the
+full smoke-test checklist, see `docs/manual-test.md`.
+
+See `CHANGELOG.md` for the `v0.1.0` release notes.
 
 ## Requirements
 
@@ -80,6 +92,8 @@ go run ./examples/control toggle
 go run ./examples/control seek 30s
 go run ./examples/create
 ```
+
+More manual verification commands are documented in `docs/manual-test.md`.
 
 ## Implementation Notes
 

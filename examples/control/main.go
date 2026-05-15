@@ -10,10 +10,20 @@ import (
 
 	"github.com/xiaowumin-mark/smtc-suite-go/pkg/smtc"
 	"github.com/xiaowumin-mark/smtc-suite-go/pkg/smtc/control"
+	"github.com/xiaowumin-mark/smtc-suite-go/pkg/smtc/monitor"
 )
 
 func main() {
 	sessionID, command, args := parseArgs(os.Args[1:])
+	if command == "help" || command == "-h" || command == "--help" {
+		fmt.Println(usage())
+		return
+	}
+	if command == "sessions" {
+		listSessions()
+		return
+	}
+
 	ctrl, err := control.New(sessionID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -118,6 +128,25 @@ func printInfo(ctrl *control.Controller) {
 	fmt.Printf("Cover: %t, bytes=%d, sha256=%s\n", info.ThumbnailAvailable, len(info.ThumbnailData), shortHash(info.ThumbnailHash))
 }
 
+func listSessions() {
+	m, err := monitor.New(nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer m.Close()
+
+	sessions := m.Sessions()
+	if len(sessions) == 0 {
+		fmt.Println("No active SMTC sessions found.")
+		return
+	}
+	for i, s := range sessions {
+		fmt.Printf("[%d] %s\n", i+1, s.SourceAppUserModelID)
+		fmt.Printf("    %s - %s (%s)\n", s.MediaInfo.Title, s.MediaInfo.Artist, s.PlaybackStatus)
+	}
+}
+
 func parseBoolArg(value string) (bool, error) {
 	switch value {
 	case "1", "true", "on", "yes":
@@ -148,6 +177,8 @@ func usage() string {
   go run ./examples/control -session <app-user-model-id> [command]
 
 Commands:
+  help
+  sessions
   info
   play | pause | toggle | stop
   next | prev | ff | rewind
