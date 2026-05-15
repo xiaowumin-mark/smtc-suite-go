@@ -23,5 +23,8 @@ ref/
 Thumbs.db
 .DS_Store
 
+
 # Local config (not for version control)
-.claude/settings.local.json
+/.claude
+
+
