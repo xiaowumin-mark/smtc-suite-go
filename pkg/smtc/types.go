@@ -1,5 +1,3 @@
-//go:build windows && cgo
-
 package smtc
 
 import "time"
@@ -62,29 +60,61 @@ const (
 type Button int32
 
 const (
-	ButtonPlay         Button = 0
-	ButtonPause        Button = 1
-	ButtonStop         Button = 2
-	ButtonRecord       Button = 3
-	ButtonFastForward  Button = 4
-	ButtonRewind       Button = 5
-	ButtonNext         Button = 6
-	ButtonPrevious     Button = 7
-	ButtonChannelUp    Button = 8
-	ButtonChannelDown  Button = 9
+	ButtonPlay        Button = 0
+	ButtonPause       Button = 1
+	ButtonStop        Button = 2
+	ButtonRecord      Button = 3
+	ButtonFastForward Button = 4
+	ButtonRewind      Button = 5
+	ButtonNext        Button = 6
+	ButtonPrevious    Button = 7
+	ButtonChannelUp   Button = 8
+	ButtonChannelDown Button = 9
 )
+
+// String returns the Windows media transport button name.
+func (b Button) String() string {
+	switch b {
+	case ButtonPlay:
+		return "Play"
+	case ButtonPause:
+		return "Pause"
+	case ButtonStop:
+		return "Stop"
+	case ButtonRecord:
+		return "Record"
+	case ButtonFastForward:
+		return "FastForward"
+	case ButtonRewind:
+		return "Rewind"
+	case ButtonNext:
+		return "Next"
+	case ButtonPrevious:
+		return "Previous"
+	case ButtonChannelUp:
+		return "ChannelUp"
+	case ButtonChannelDown:
+		return "ChannelDown"
+	default:
+		return "Unknown"
+	}
+}
 
 // MediaInfo holds track/album metadata for a media session.
 type MediaInfo struct {
-	Title          string
-	Subtitle       string
-	Artist         string
-	AlbumArtist    string
-	AlbumTitle     string
-	TrackNumber    int32
+	Title           string
+	Subtitle        string
+	Artist          string
+	AlbumArtist     string
+	AlbumTitle      string
+	TrackNumber     int32
 	AlbumTrackCount int32
-	Genres         []string
-	PlaybackType   PlaybackType
+	Genres          []string
+	PlaybackType    PlaybackType
+	// ThumbnailAvailable reports whether the session exposed cover artwork.
+	ThumbnailAvailable bool
+	ThumbnailData      []byte
+	ThumbnailHash      string
 }
 
 // TimelineInfo holds playback position and timing information.

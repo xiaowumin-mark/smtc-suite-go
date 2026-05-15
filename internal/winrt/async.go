@@ -4,18 +4,27 @@ package winrt
 
 import (
 	"fmt"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 )
 
 // IAsyncOperation vtable slots:
-//   IUnknown 0-2, IInspectable 3-5, PutCompleted 6, GetCompleted 7, GetResults 8
+//
+//	IUnknown 0-2, IInspectable 3-5, PutCompleted 6, GetCompleted 7, GetResults 8
 const (
 	asyncSlotPutCompleted = 6
 	asyncSlotGetCompleted = 7
 	asyncSlotGetResults   = 8
+)
+
+// IAsyncOperationWithProgress<TResult, TProgress> vtable slots:
+//
+//	IUnknown 0-2, IInspectable 3-5, PutProgress 6, GetProgress 7,
+//	PutCompleted 8, GetCompleted 9, GetResults 10
+const (
+	asyncProgressSlotPutCompleted = 8
+	asyncProgressSlotGetResults   = 10
 )
 
 type asyncStatus int32
@@ -33,22 +42,16 @@ const defaultAsyncTimeout = 30 * time.Second
 
 // completionHandlerVtbl: IUnknown(3) + Invoke(1) = 4 slots, using syscall.NewCallback
 type completionHandler struct {
-	obj  uintptr // raw COM object pointer (HeapAlloc'd)
-	ch   chan asyncStatus
+	obj uintptr // raw COM object pointer (HeapAlloc'd)
+	ch  chan asyncStatus
 }
 
 // Global Go-callable functions for the handler vtable (used via syscall.NewCallback)
 var (
-	_qicb  = syscall.NewCallback(handlerQueryInterface)
+	_qicb   = syscall.NewCallback(handlerQueryInterface)
 	_addrcb = syscall.NewCallback(handlerAddRef)
 	_relcb  = syscall.NewCallback(handlerRelease)
 	_invcb  = syscall.NewCallback(handlerInvoke)
-)
-
-// Per-instance tracking (simplified: one handler at a time)
-var (
-	gHandlerMu sync.Mutex
-	gHandler   *completionHandler
 )
 
 func handlerQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
@@ -56,14 +59,6 @@ func handlerQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
 		return 0x80004003 // E_POINTER
 	}
 	g := (*GUID)(unsafe.Pointer(riid))
-
-	// Known handler IIDs (from go-libnp)
-	knownHandlerIIDs := []GUID{
-		// IAsyncOperationCompletedHandler<IGSMTCSessionManager*>
-		{0x10F0074E, 0x923D, 0x5510, [8]byte{0x8F, 0x4A, 0xDD, 0xE3, 0x77, 0x54, 0xCA, 0x0E}},
-		// IAsyncOperationCompletedHandler<IMediaProperties*>
-		{0x84593A3D, 0x951A, 0x55B6, [8]byte{0x83, 0x53, 0x52, 0x05, 0xE5, 0x77, 0x79, 0x7B}},
-	}
 
 	// IUnknown: {00000000-0000-0000-C000-000000000046}
 	unknownIID := GUID{0, 0, 0, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
@@ -77,13 +72,23 @@ func handlerQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
 		*(*uintptr)(unsafe.Pointer(ppv)) = self
 		return 0
 	}
-	// Check known handler IIDs
-	for _, hid := range knownHandlerIIDs {
-		if isSameGUID(g, &hid) {
-			*(*uintptr)(unsafe.Pointer(ppv)) = self
-			return 0
-		}
+	if isSameGUID(g, IID_IAgileObject) {
+		*(*uintptr)(unsafe.Pointer(ppv)) = self
+		return 0
 	}
+
+	// Store the first non-standard IID per handler instance, then accept
+	// subsequent queries for that same parameterized handler IID.
+	capturedPtr := (*GUID)(unsafe.Pointer(self + 16))
+	if capturedPtr.Data1 == 0 && capturedPtr.Data2 == 0 && capturedPtr.Data3 == 0 {
+		// First non-standard IID — capture it
+		*capturedPtr = *g
+	}
+	if isSameGUID(g, capturedPtr) {
+		*(*uintptr)(unsafe.Pointer(ppv)) = self
+		return 0
+	}
+
 	*(*uintptr)(unsafe.Pointer(ppv)) = 0
 	return 0x80004002 // E_NOINTERFACE
 }
@@ -115,10 +120,9 @@ func handlerRelease(self uintptr) uintptr {
 }
 
 func handlerInvoke(self uintptr, operation uintptr, status int32) uintptr {
-	gHandlerMu.Lock()
-	h := gHandler
-	gHandlerMu.Unlock()
-	if h != nil {
+	handle := *(*uintptr)(unsafe.Pointer(self + unsafe.Sizeof(uintptr(0)) + 8 + 16))
+	if handle != 0 {
+		h := (*completionHandler)(unsafe.Pointer(handle))
 		select {
 		case h.ch <- asyncStatus(status):
 		default:
@@ -128,9 +132,9 @@ func handlerInvoke(self uintptr, operation uintptr, status int32) uintptr {
 }
 
 var (
-	modkernel32    = syscall.NewLazyDLL("kernel32.dll")
-	procHeapAlloc  = modkernel32.NewProc("HeapAlloc")
-	procHeapFree   = modkernel32.NewProc("HeapFree")
+	modkernel32        = syscall.NewLazyDLL("kernel32.dll")
+	procHeapAlloc      = modkernel32.NewProc("HeapAlloc")
+	procHeapFree       = modkernel32.NewProc("HeapFree")
 	procGetProcessHeap = modkernel32.NewProc("GetProcessHeap")
 )
 
@@ -151,8 +155,8 @@ func newCompletionHandler() *completionHandler {
 	}
 
 	// Allocate vtable + object from process heap
-	// Object layout: [vtable_ptr(8)] [refCount(4)] [padding(4)]
-	objSize := unsafe.Sizeof(uintptr(0)) + 8
+	// Object layout: [vtable_ptr] [refCount|padding] [capturedIID] [go handler pointer]
+	objSize := unsafe.Sizeof(uintptr(0)) + 8 + 16 + unsafe.Sizeof(uintptr(0))
 	objPtr := heapAlloc(objSize)
 	if objPtr == nil {
 		return nil
@@ -173,12 +177,9 @@ func newCompletionHandler() *completionHandler {
 
 	// Object points to vtable
 	*(*uintptr)(objPtr) = uintptr(vtPtr)
+	*(*uintptr)(unsafe.Add(objPtr, unsafe.Sizeof(uintptr(0))+8+16)) = uintptr(unsafe.Pointer(h))
 
 	h.obj = uintptr(objPtr)
-
-	gHandlerMu.Lock()
-	gHandler = h
-	gHandlerMu.Unlock()
 
 	return h
 }
@@ -188,11 +189,6 @@ func (h *completionHandler) ptr() uintptr {
 }
 
 func (h *completionHandler) close() {
-	gHandlerMu.Lock()
-	if gHandler == h {
-		gHandler = nil
-	}
-	gHandlerMu.Unlock()
 	if h.obj != 0 {
 		vtPtr := *(*uintptr)(unsafe.Pointer(h.obj))
 		if vtPtr != 0 {
@@ -207,7 +203,6 @@ func (h *completionHandler) close() {
 
 type AsyncOperation struct {
 	Ptr unsafe.Pointer
-	mu  sync.Mutex
 }
 
 func NewAsyncOperation(p unsafe.Pointer) *AsyncOperation {
@@ -262,6 +257,61 @@ func (a *AsyncOperation) GetResults() (unsafe.Pointer, error) {
 }
 
 func (a *AsyncOperation) Close() error { return nil }
+
+type AsyncOperationWithProgress struct {
+	Ptr unsafe.Pointer
+}
+
+func NewAsyncOperationWithProgress(p unsafe.Pointer) *AsyncOperationWithProgress {
+	return &AsyncOperationWithProgress{Ptr: p}
+}
+
+func (a *AsyncOperationWithProgress) Wait() (unsafe.Pointer, error) {
+	return a.WaitTimeout(defaultAsyncTimeout)
+}
+
+func (a *AsyncOperationWithProgress) WaitTimeout(timeout time.Duration) (unsafe.Pointer, error) {
+	if a.Ptr == nil {
+		return nil, fmt.Errorf("winrt: async operation with progress is nil")
+	}
+
+	h := newCompletionHandler()
+	if h == nil {
+		return nil, fmt.Errorf("winrt: failed to create completion handler")
+	}
+	defer h.close()
+
+	fn := vtableFn(a.Ptr, asyncProgressSlotPutCompleted)
+	r1, _, _ := syscall.SyscallN(fn, uintptr(a.Ptr), h.ptr())
+	if int32(r1) < 0 {
+		return nil, hresultErrorInt("put_Completed", int32(r1))
+	}
+
+	select {
+	case s := <-h.ch:
+		syscall.SyscallN(fn, uintptr(a.Ptr), 0)
+		switch s {
+		case asyncStatusCompleted:
+			return VtableGetPtr(a.Ptr, asyncProgressSlotGetResults)
+		case asyncStatusError:
+			return nil, fmt.Errorf("winrt: async operation failed (status=Error)")
+		case asyncStatusCanceled:
+			return nil, fmt.Errorf("winrt: async operation was canceled")
+		default:
+			return nil, fmt.Errorf("winrt: async operation status %d", s)
+		}
+	case <-time.After(timeout):
+		syscall.SyscallN(fn, uintptr(a.Ptr), 0)
+		return nil, fmt.Errorf("winrt: async operation timed out after %v", timeout)
+	}
+}
+
+func (a *AsyncOperationWithProgress) Release() {
+	if a.Ptr != nil {
+		Release(a.Ptr)
+		a.Ptr = nil
+	}
+}
 
 func (a *AsyncOperation) Release() {
 	if a.Ptr != nil {

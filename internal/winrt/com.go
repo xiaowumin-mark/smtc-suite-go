@@ -208,17 +208,48 @@ func VtablePutI32(obj unsafe.Pointer, slot int, value int32) error {
 	return nil
 }
 
+// VtablePutTicks calls a vtable put_* method with a TimeSpan value.
+//
+// WinRT TimeSpan is represented as a signed 64-bit count of 100ns ticks and is
+// passed by value in the Windows x64 integer ABI.
+func VtablePutTicks(obj unsafe.Pointer, slot int, value int64) error {
+	fn := vtableFn(obj, slot)
+	r1, _, _ := syscall.SyscallN(fn, uintptr(obj), uintptr(value))
+	if int32(r1) < 0 {
+		return hresultErrorInt("VtablePutTicks", int32(r1))
+	}
+	return nil
+}
+
 // VtablePutF64 calls a vtable put_* method with a float64 value.
 func VtablePutF64(obj unsafe.Pointer, slot int, value float64) error {
 	fn := vtableFn(obj, slot)
-	r1, _, _ := syscall.SyscallN(fn,
-		uintptr(obj),
-		uintptr(unsafe.Pointer(&value)),
+	hr := C.smtcVtablePutF64(
+		obj,
+		unsafe.Pointer(fn),
+		C.double(value),
 	)
-	if int32(r1) < 0 {
-		return hresultErrorInt("VtablePutF64", int32(r1))
+	if hr < 0 {
+		return hresultError("VtablePutF64", hr)
 	}
 	return nil
+}
+
+// VtableAsyncBoolWithF64 calls a method that takes a float64 and returns
+// IAsyncOperation<bool> through an out parameter.
+func VtableAsyncBoolWithF64(obj unsafe.Pointer, slot int, value float64) (unsafe.Pointer, error) {
+	fn := vtableFn(obj, slot)
+	var asyncPtr unsafe.Pointer
+	hr := C.smtcAsyncF64(
+		obj,
+		unsafe.Pointer(fn),
+		C.double(value),
+		&asyncPtr,
+	)
+	if hr < 0 {
+		return nil, hresultError("VtableAsyncBoolWithF64", hr)
+	}
+	return asyncPtr, nil
 }
 
 // VtablePutHSTRING calls a vtable put_* method with an HSTRING value.
@@ -237,8 +268,8 @@ func VtablePutHSTRING(obj unsafe.Pointer, slot int, hstr *HSTRING) error {
 
 // ---- Internal (unexported) helpers ----
 
-// vtableCall3 calls a vtable method (slot) with object + 1 arg, returning HRESULT.
-func vtableCall3(obj unsafe.Pointer, slot int, arg1 uintptr) error {
+// VtableCall3 calls a vtable method (slot) with object + 1 arg, returning HRESULT.
+func VtableCall3(obj unsafe.Pointer, slot int, arg1 uintptr) error {
 	fn := vtableFn(obj, slot)
 	r1, _, _ := syscall.SyscallN(fn, uintptr(obj), arg1)
 	if int32(r1) < 0 {

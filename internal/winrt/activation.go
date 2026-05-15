@@ -29,3 +29,25 @@ func GetActivationFactory(className string, iid *GUID) (unsafe.Pointer, error) {
 	}
 	return factory, nil
 }
+
+// ActivateInstance activates a WinRT runtime class and returns its default
+// interface as an IInspectable pointer.
+//
+// The caller is responsible for calling Release() on the returned pointer.
+func ActivateInstance(className string) (unsafe.Pointer, error) {
+	hstr, err := NewHSTRING(className)
+	if err != nil {
+		return nil, err
+	}
+	defer hstr.Delete()
+
+	var instance unsafe.Pointer
+	hr := C.RoActivateInstance(
+		hstr.Raw(),
+		&instance,
+	)
+	if hr < 0 {
+		return nil, hresultError("RoActivateInstance("+className+")", hr)
+	}
+	return instance, nil
+}

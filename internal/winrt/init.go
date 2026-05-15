@@ -7,46 +7,63 @@ import "C"
 import (
 	"fmt"
 	"runtime"
-	"sync"
+	"sync/atomic"
 )
 
 // ---- MTA Initialization (for Monitor and Control modules) ----
 
 var (
-	mtaMu       sync.Mutex
-	mtaRefCount int32 // number of active InitMTA calls (unpaired)
+	mtaInits atomic.Int32
+	roInits  atomic.Int32
+	coInits  atomic.Int32
 )
 
 // InitMTA initializes COM/WinRT on the calling thread in MTA mode.
 //
 // Tries CoInitializeEx first (like go-libnp), then RoInitialize as fallback.
 func InitMTA() error {
-	mtaMu.Lock()
-	defer mtaMu.Unlock()
-
 	// Try classic COM init first (COINIT_MULTITHREADED = 0)
 	hr := C.CoInitializeEx(nil, 0)
-	if hr < 0 {
-		// Fall back to RoInitialize
-		hr = C.RoInitialize(C.RO_INIT_MULTITHREADED)
-		if hr < 0 {
-			return hresultError("COM/WinRT init (MTA)", hr)
-		}
+	if hr >= 0 {
+		coInits.Add(1)
+		mtaInits.Add(1)
+		return nil
 	}
-	mtaRefCount++
-	return nil
+	// Fall back to RoInitialize. RPC_E_CHANGED_MODE means this thread is already
+	// initialized for another apartment; WinRT activation can still be used from
+	// that thread, so treat it as an attach that needs no uninitialize call here.
+	if uint32(hr) == 0x80010106 {
+		mtaInits.Add(1)
+		return nil
+	}
+
+	roHR := C.RoInitialize(C.RO_INIT_MULTITHREADED)
+	if roHR >= 0 {
+		roInits.Add(1)
+		mtaInits.Add(1)
+		return nil
+	}
+	if uint32(roHR) == 0x80010106 {
+		mtaInits.Add(1)
+		return nil
+	}
+	return hresultError("COM/WinRT init (MTA)", roHR)
 }
 
 // UninitMTA uninitializes COM/WinRT on the calling thread.
 func UninitMTA() {
-	mtaMu.Lock()
-	defer mtaMu.Unlock()
-
-	if mtaRefCount > 0 {
-		mtaRefCount--
+	if mtaInits.Load() > 0 {
+		mtaInits.Add(-1)
 	}
-	C.CoUninitialize()
-	C.RoUninitialize()
+	if coInits.Load() > 0 {
+		coInits.Add(-1)
+		C.CoUninitialize()
+		return
+	}
+	if roInits.Load() > 0 {
+		roInits.Add(-1)
+		C.RoUninitialize()
+	}
 }
 
 // ---- STA Initialization (for Create module) ----

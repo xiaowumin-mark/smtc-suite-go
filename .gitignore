@@ -16,6 +16,9 @@
 # Go
 vendor/
 
+# Reference source checkouts
+ref/
+
 # OS
 Thumbs.db
 .DS_Store

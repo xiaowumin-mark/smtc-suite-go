@@ -57,6 +57,11 @@ HRESULT WINAPI RoGetActivationFactory(
     void    **factory
 );
 
+HRESULT WINAPI RoActivateInstance(
+    HSTRING activatableClassId,
+    void **instance
+);
+
 // ---- HSTRING management (combase.dll) ----
 HRESULT WINAPI WindowsCreateString(
     LPCWSTR  sourceString,
@@ -119,5 +124,16 @@ struct IInspectable {
 
 // Function pointer type for Go callbacks invoked from WinRT event handlers.
 typedef void (*GoEventCallback)(void *sender, void *args, void *userData);
+
+typedef HRESULT (STDMETHODCALLTYPE *SMTCVtablePutF64Fn)(void *self, double value);
+typedef HRESULT (STDMETHODCALLTYPE *SMTCAsyncF64Fn)(void *self, double value, void **operation);
+
+static inline HRESULT smtcVtablePutF64(void *self, void *fn, double value) {
+    return ((SMTCVtablePutF64Fn)fn)(self, value);
+}
+
+static inline HRESULT smtcAsyncF64(void *self, void *fn, double value, void **operation) {
+    return ((SMTCAsyncF64Fn)fn)(self, value, operation);
+}
 
 #endif // SMTC_WINRT_HELPERS_H
