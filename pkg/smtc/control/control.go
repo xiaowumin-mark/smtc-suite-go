@@ -123,11 +123,6 @@ func (c *Controller) Rewind() error { return c.asyncBool(smtcvt.Slot_Session_Try
 
 // Seek moves the playback position.
 func (c *Controller) Seek(position time.Duration) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return fmt.Errorf("control: closed")
-	}
 	ticks := smtc.DurationToTicks(position)
 	return c.asyncBoolWithArg(smtcvt.Slot_Session_TryChangePlaybackPositionAsync, uintptr(ticks))
 }
@@ -250,8 +245,11 @@ func (c *Controller) asyncBool(slot int) error {
 		return fmt.Errorf("control: HRESULT 0x%08X", uint32(r1))
 	}
 	asyncOp := winrt.NewAsyncOperationBool(asyncPtr)
-	_, err := asyncOp.WaitTimeout(5 * time.Second)
+	ok, err := asyncOp.WaitTimeout(5 * time.Second)
 	asyncOp.Release()
+	if err == nil && !ok {
+		return fmt.Errorf("control: operation rejected")
+	}
 	return err
 }
 
@@ -267,9 +265,12 @@ func (c *Controller) asyncBoolWithArg(slot int, arg uintptr) error {
 	if int32(r1) < 0 {
 		return fmt.Errorf("control: HRESULT 0x%08X", uint32(r1))
 	}
-	asyncOp := winrt.NewAsyncOperation(asyncPtr)
-	_, err := asyncOp.WaitTimeout(5 * time.Second)
+	asyncOp := winrt.NewAsyncOperationBool(asyncPtr)
+	ok, err := asyncOp.WaitTimeout(5 * time.Second)
 	asyncOp.Release()
+	if err == nil && !ok {
+		return fmt.Errorf("control: operation rejected")
+	}
 	return err
 }
 
@@ -284,7 +285,10 @@ func (c *Controller) asyncBoolWithFloat(slot int, val float64) error {
 		return fmt.Errorf("control: async float64 call: %w", err)
 	}
 	asyncOp := winrt.NewAsyncOperationBool(asyncPtr)
-	_, err = asyncOp.WaitTimeout(5 * time.Second)
+	ok, err := asyncOp.WaitTimeout(5 * time.Second)
 	asyncOp.Release()
+	if err == nil && !ok {
+		return fmt.Errorf("control: operation rejected")
+	}
 	return err
 }

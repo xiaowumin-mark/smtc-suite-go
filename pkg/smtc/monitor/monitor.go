@@ -477,6 +477,78 @@ func fetchPlaybackUpdate(sessionPtr unsafe.Pointer, info *smtc.SessionInfo) {
 	if status, err := winrt.VtableGetI32(playbackPtr, smtcvt.Slot_PlaybackInfo_PlaybackStatus); err == nil {
 		info.PlaybackStatus = smtc.PlaybackStatus(status)
 	}
+	if playbackType, ok := getOptionalI32(playbackPtr, smtcvt.Slot_PlaybackInfo_PlaybackType); ok {
+		info.PlaybackType = smtc.PlaybackType(playbackType)
+	}
+	if repeat, ok := getOptionalI32(playbackPtr, smtcvt.Slot_PlaybackInfo_AutoRepeatMode); ok {
+		info.AutoRepeatMode = smtc.AutoRepeatMode(repeat)
+	}
+	if rate, ok := getOptionalF64(playbackPtr, smtcvt.Slot_PlaybackInfo_PlaybackRate); ok {
+		info.PlaybackRate = rate
+		info.TimelineInfo.PlaybackRate = rate
+	}
+	if shuffle, ok := getOptionalBool(playbackPtr, smtcvt.Slot_PlaybackInfo_IsShuffleActive); ok {
+		info.IsShuffleActive = shuffle
+	}
+	if controlsPtr, err := winrt.VtableGetPtr(playbackPtr, smtcvt.Slot_PlaybackInfo_Controls); err == nil && controlsPtr != nil {
+		info.PlaybackControls = fetchPlaybackControls(controlsPtr)
+		winrt.Release(controlsPtr)
+	}
+}
+
+func getOptionalI32(obj unsafe.Pointer, slot int) (int32, bool) {
+	ref, err := winrt.VtableGetPtr(obj, slot)
+	if err != nil || ref == nil {
+		return 0, false
+	}
+	defer winrt.Release(ref)
+	v, err := winrt.ReferenceGetI32(ref)
+	return v, err == nil
+}
+
+func getOptionalBool(obj unsafe.Pointer, slot int) (bool, bool) {
+	ref, err := winrt.VtableGetPtr(obj, slot)
+	if err != nil || ref == nil {
+		return false, false
+	}
+	defer winrt.Release(ref)
+	v, err := winrt.ReferenceGetBool(ref)
+	return v, err == nil
+}
+
+func getOptionalF64(obj unsafe.Pointer, slot int) (float64, bool) {
+	ref, err := winrt.VtableGetPtr(obj, slot)
+	if err != nil || ref == nil {
+		return 0, false
+	}
+	defer winrt.Release(ref)
+	v, err := winrt.ReferenceGetF64(ref)
+	return v, err == nil
+}
+
+func fetchPlaybackControls(controlsPtr unsafe.Pointer) smtc.PlaybackControls {
+	return smtc.PlaybackControls{
+		Play:             getControlBool(controlsPtr, smtcvt.Slot_Controls_IsPlayEnabled),
+		Pause:            getControlBool(controlsPtr, smtcvt.Slot_Controls_IsPauseEnabled),
+		Stop:             getControlBool(controlsPtr, smtcvt.Slot_Controls_IsStopEnabled),
+		Record:           getControlBool(controlsPtr, smtcvt.Slot_Controls_IsRecordEnabled),
+		FastForward:      getControlBool(controlsPtr, smtcvt.Slot_Controls_IsFastForwardEnabled),
+		Rewind:           getControlBool(controlsPtr, smtcvt.Slot_Controls_IsRewindEnabled),
+		Next:             getControlBool(controlsPtr, smtcvt.Slot_Controls_IsNextEnabled),
+		Previous:         getControlBool(controlsPtr, smtcvt.Slot_Controls_IsPreviousEnabled),
+		ChannelUp:        getControlBool(controlsPtr, smtcvt.Slot_Controls_IsChannelUpEnabled),
+		ChannelDown:      getControlBool(controlsPtr, smtcvt.Slot_Controls_IsChannelDownEnabled),
+		PlayPauseToggle:  getControlBool(controlsPtr, smtcvt.Slot_Controls_IsPlayPauseToggleEnabled),
+		Shuffle:          getControlBool(controlsPtr, smtcvt.Slot_Controls_IsShuffleEnabled),
+		Repeat:           getControlBool(controlsPtr, smtcvt.Slot_Controls_IsRepeatEnabled),
+		PlaybackRate:     getControlBool(controlsPtr, smtcvt.Slot_Controls_IsPlaybackRateEnabled),
+		PlaybackPosition: getControlBool(controlsPtr, smtcvt.Slot_Controls_IsPlaybackPositionEnabled),
+	}
+}
+
+func getControlBool(controlsPtr unsafe.Pointer, slot int) bool {
+	v, err := winrt.VtableGetBool(controlsPtr, slot)
+	return err == nil && v
 }
 
 func fetchTimelineUpdate(sessionPtr unsafe.Pointer, info *smtc.SessionInfo) {
@@ -497,6 +569,9 @@ func fetchMediaUpdate(sessionPtr unsafe.Pointer, info *smtc.SessionInfo) {
 	if mediaPtr, err := asyncOp.Wait(); err == nil && mediaPtr != nil {
 		defer winrt.Release(mediaPtr)
 		info.MediaInfo = fetchMediaInfo(mediaPtr)
+		if info.MediaInfo.PlaybackType != smtc.PlaybackTypeUnknown {
+			info.PlaybackType = info.MediaInfo.PlaybackType
+		}
 	}
 	asyncOp.Release()
 }
@@ -547,6 +622,9 @@ func fetchMediaInfo(mediaPtr unsafe.Pointer) smtc.MediaInfo {
 	}
 	if n, err := winrt.VtableGetI32(mediaPtr, smtcvt.Slot_MediaProps_AlbumTrackCount); err == nil {
 		mi.AlbumTrackCount = n
+	}
+	if playbackType, ok := getOptionalI32(mediaPtr, smtcvt.Slot_MediaProps_PlaybackType); ok {
+		mi.PlaybackType = smtc.PlaybackType(playbackType)
 	}
 	if thumbnailPtr, err := winrt.VtableGetPtr(mediaPtr, smtcvt.Slot_MediaProps_Thumbnail); err == nil && thumbnailPtr != nil {
 		mi.ThumbnailAvailable = true

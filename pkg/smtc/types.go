@@ -56,6 +56,19 @@ const (
 	AutoRepeatList  AutoRepeatMode = 2
 )
 
+func (m AutoRepeatMode) String() string {
+	switch m {
+	case AutoRepeatNone:
+		return "None"
+	case AutoRepeatTrack:
+		return "Track"
+	case AutoRepeatList:
+		return "List"
+	default:
+		return "Unknown"
+	}
+}
+
 // Button identifies a system media transport button.
 type Button int32
 
@@ -148,5 +161,25 @@ type SessionInfo struct {
 	AutoRepeatMode       AutoRepeatMode
 	PlaybackRate         float64
 	IsShuffleActive      bool
+	PlaybackControls     PlaybackControls
 	TimelineInfo         TimelineInfo
+}
+
+// PlaybackControls reports which transport operations a session says it supports.
+type PlaybackControls struct {
+	Play             bool
+	Pause            bool
+	Stop             bool
+	Record           bool
+	FastForward      bool
+	Rewind           bool
+	Next             bool
+	Previous         bool
+	ChannelUp        bool
+	ChannelDown      bool
+	PlayPauseToggle  bool
+	Shuffle          bool
+	Repeat           bool
+	PlaybackRate     bool
+	PlaybackPosition bool
 }

@@ -10,6 +10,31 @@ Go bindings for Windows System Media Transport Controls (SMTC), implemented with
 | `pkg/smtc/control` | Usable | Controls existing media sessions with play/pause/skip/seek/shuffle/repeat. Playback rate needs a CGo ABI helper. |
 | `pkg/smtc/create` | Experimental | Publishes a MediaPlayer-backed SMTC session with metadata, timeline, artwork, enabled buttons, and button events. |
 
+## Feature Matrix
+
+| Area | Monitor | Control | Create |
+|---|---:|---:|---:|
+| Enumerate sessions | Yes | Yes, for lookup | N/A |
+| Current session | Yes | Default target | N/A |
+| Media title/artist/album | Yes | Read current target | Publish title/artist |
+| Cover artwork | Read bytes/hash | Read bytes/hash | Publish file or URI reference |
+| Playback status | Yes | Via commands | Publish |
+| Timeline position/duration | Yes | Seek | Publish |
+| Playback controls/capabilities | Yes | Not exposed yet | Common buttons |
+| Shuffle/repeat/playback rate state | Yes | Set | Playback rate publish |
+| Button events | N/A | N/A | Yes |
+
+## Known Limitations
+
+- This project uses raw COM vtable slots. Wrong slots can crash the process, so new WinRT APIs should be added conservatively.
+- COM/WinRT initialization is still thread-sensitive. A future runtime should centralize calls on dedicated apartment threads.
+- Monitor metadata is best-effort. Some apps do not expose artwork, playback rate, repeat, or shuffle state.
+- Control operations can be rejected by the target media app even when the async call completes successfully.
+- Create is experimental. Windows Shell behavior varies by Windows version, especially for local file artwork.
+- Create currently enables only common buttons: play, pause, stop, next, and previous.
+- There are no automated WinRT integration tests yet; examples are the primary runtime verification path.
+- See `docs/com-runtime-plan.md` for the planned dedicated apartment runtime refactor.
+
 ## Requirements
 
 | Requirement | Details |
@@ -50,7 +75,9 @@ func main() {
 
 ```powershell
 go run ./examples/monitor
-go run ./examples/control
+go run ./examples/control info
+go run ./examples/control toggle
+go run ./examples/control seek 30s
 go run ./examples/create
 ```
 

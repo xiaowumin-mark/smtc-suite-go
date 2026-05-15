@@ -3,6 +3,7 @@
 package create
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"syscall"
@@ -607,9 +608,10 @@ func (c *Creator) Close() error {
 		return nil
 	}
 	c.closed = true
+	var errs []error
 	if c.buttonEvent != nil {
 		if err := c.buttonEvent.Close(); err != nil {
-			return fmt.Errorf("create: close ButtonPressed handler: %w", err)
+			errs = append(errs, fmt.Errorf("close ButtonPressed handler: %w", err))
 		}
 		c.buttonEvent = nil
 	}
@@ -630,5 +632,8 @@ func (c *Creator) Close() error {
 		c.mediaPlayer = nil
 	}
 	winrt.UninitMTA()
+	if len(errs) > 0 {
+		return fmt.Errorf("create: close: %w", errors.Join(errs...))
+	}
 	return nil
 }

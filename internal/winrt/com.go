@@ -184,6 +184,21 @@ func VtableGetTicks(obj unsafe.Pointer, slot int) (int64, error) {
 	return result, nil
 }
 
+// ReferenceGetI32 reads the Value property from an IReference<int32-like> object.
+func ReferenceGetI32(obj unsafe.Pointer) (int32, error) {
+	return VtableGetI32(obj, 6)
+}
+
+// ReferenceGetBool reads the Value property from an IReference<bool> object.
+func ReferenceGetBool(obj unsafe.Pointer) (bool, error) {
+	return VtableGetBool(obj, 6)
+}
+
+// ReferenceGetF64 reads the Value property from an IReference<double> object.
+func ReferenceGetF64(obj unsafe.Pointer) (float64, error) {
+	return VtableGetF64(obj, 6)
+}
+
 // VtablePutBool calls a vtable put_* method with a boolean value.
 func VtablePutBool(obj unsafe.Pointer, slot int, value bool) error {
 	fn := vtableFn(obj, slot)
