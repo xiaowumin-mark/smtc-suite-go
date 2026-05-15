@@ -16,6 +16,9 @@
 # Go
 vendor/
 
+# Generated cover files from examples/monitor
+testdata/
+
 # Reference source checkouts
 ref/
 
@@ -26,5 +29,4 @@ Thumbs.db
 
 # Local config (not for version control)
 /.claude
-
 

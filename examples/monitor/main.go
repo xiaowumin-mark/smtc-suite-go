@@ -4,13 +4,19 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/xiaowumin-mark/smtc-suite-go/pkg/smtc"
 	"github.com/xiaowumin-mark/smtc-suite-go/pkg/smtc/monitor"
 )
+
+const coverDir = "testdata"
+
+var savedCovers = make(map[string]bool)
 
 func main() {
 	m, err := monitor.New(nil)
@@ -20,7 +26,9 @@ func main() {
 	}
 	defer m.Close()
 
-	printSessions(m.Sessions())
+	sessions := m.Sessions()
+	printSessions(sessions)
+	saveSessionCovers(sessions)
 	if cur := m.CurrentSession(); cur != nil {
 		fmt.Printf("Current session: %s - %s\n", cur.MediaInfo.Title, cur.MediaInfo.Artist)
 	}
@@ -74,6 +82,7 @@ func printEvent(evt monitor.ManagerEvent) {
 	case monitor.ManagerEventSessionMediaChanged:
 		fmt.Printf("SessionMediaChanged: %s\n", evt.SessionID)
 		printEventSession(evt.Session)
+		saveEventCover(evt.Session)
 	}
 }
 
@@ -98,4 +107,55 @@ func shortHash(hash string) string {
 		return hash
 	}
 	return hash[:12]
+}
+
+func saveSessionCovers(sessions []smtc.SessionInfo) {
+	for _, s := range sessions {
+		saveCover(s.MediaInfo)
+	}
+}
+
+func saveEventCover(session *smtc.SessionInfo) {
+	if session == nil {
+		return
+	}
+	saveCover(session.MediaInfo)
+}
+
+func saveCover(info smtc.MediaInfo) {
+	if len(info.ThumbnailData) == 0 || info.ThumbnailHash == "" {
+		return
+	}
+	if savedCovers[info.ThumbnailHash] {
+		return
+	}
+
+	if err := os.MkdirAll(coverDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "Save cover: create %s failed: %v\n", coverDir, err)
+		return
+	}
+
+	name := fmt.Sprintf("cover-%s%s", shortHash(info.ThumbnailHash), imageExt(info.ThumbnailData))
+	path := filepath.Join(coverDir, name)
+	if err := os.WriteFile(path, info.ThumbnailData, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "Save cover: write %s failed: %v\n", path, err)
+		return
+	}
+	savedCovers[info.ThumbnailHash] = true
+	fmt.Printf("Saved cover: %s (%d bytes)\n", path, len(info.ThumbnailData))
+}
+
+func imageExt(data []byte) string {
+	switch {
+	case len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff:
+		return ".jpg"
+	case len(data) >= 8 && bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}):
+		return ".png"
+	case len(data) >= 6 && (bytes.Equal(data[:6], []byte("GIF87a")) || bytes.Equal(data[:6], []byte("GIF89a"))):
+		return ".gif"
+	case len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
+		return ".webp"
+	default:
+		return ".bin"
+	}
 }
