@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.2.0 - 2026-05-17
+
+Experimental Windows audio loopback release.
+
+### Added
+
+- Planned `pkg/audio/loopback` API skeleton for future WASAPI system-output
+  capture, including shared `pkg/audio` format types and unsupported stubs.
+- Detailed audio loopback roadmap in `docs/audio-loopback-plan.md`.
+- Internal WASAPI loopback smoke helper at `examples/audio-smoke` for Phase 1
+  verification.
+- Experimental Windows/CGo implementation of `pkg/audio/loopback` with
+  `New`, `Start`, `Frames`, `Errors`, `Stop`, `Close`, and `Format`.
+- `examples/audio-capture` for recording the default output mix to WAV.
+- `examples/audio-meter` for realtime peak/RMS output-level visualization.
+- `examples/audio-meter -duration` option for bounded smoke-test runs.
+- `pkg/audio.ConvertToFloat32` and `CanConvertToFloat32` helpers for normalized
+  PCM sample conversion.
+- `examples/now-playing-meter` combining SMTC current-session metadata with
+  realtime loopback audio levels.
+
+### Changed
+
+- README and manual-test documentation now describe audio loopback as an
+  experimental Windows/CGo module instead of a planned feature.
+
 ## v0.1.0 - 2026-05-15
 
 Initial usable Windows SMTC release.
