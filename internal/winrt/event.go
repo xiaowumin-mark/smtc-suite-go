@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime/cgo"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -47,6 +48,14 @@ var (
 	_eventInvokeCB  = syscall.NewCallback(eventInvoke)
 )
 
+const (
+	eventCallbackHandleOffset = uintptr(8)
+	eventObjectHandleOffset   = uintptr(16)
+	eventRefCountOffset       = uintptr(24)
+	eventCapturedIIDOffset    = uintptr(32)
+	eventGUIDSize             = uintptr(16)
+)
+
 // NewEventHandler creates a new EventHandler.
 // The callback is invoked on the WinRT event thread and should do minimal work.
 func NewEventHandler(callback func(sender, args unsafe.Pointer)) *EventHandler {
@@ -63,6 +72,12 @@ func NewTypedEventHandler(accepted []*GUID, callback func(sender, args unsafe.Po
 	}
 	ev.objectHandle = cgo.NewHandle(ev)
 	ev.obj, ev.vtbl = newEventHandlerObject(uintptr(h), uintptr(ev.objectHandle))
+	if ev.obj == nil {
+		ev.objectHandle.Delete()
+		ev.objectHandle = 0
+		ev.handle.Delete()
+		ev.handle = 0
+	}
 	return ev
 }
 
@@ -128,29 +143,24 @@ func (h *EventHandler) unregisterLocked() error {
 // Close releases the event handler and its resources.
 func (h *EventHandler) Close() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed {
+		h.mu.Unlock()
 		return nil
 	}
 	if err := h.unregisterLocked(); err != nil {
+		h.mu.Unlock()
 		return err
 	}
 	h.closed = true
-	if h.handle > 0 {
-		h.handle.Delete()
-		h.handle = 0
-	}
-	if h.objectHandle > 0 {
-		h.objectHandle.Delete()
-		h.objectHandle = 0
-	}
-	if h.vtbl != nil {
-		heapFree(h.vtbl)
-		h.vtbl = nil
-	}
-	if h.obj != nil {
-		heapFree(h.obj)
-		h.obj = nil
+	obj := h.obj
+	h.obj = nil
+	h.vtbl = nil
+	h.handle = 0
+	h.objectHandle = 0
+	h.mu.Unlock()
+
+	if obj != nil {
+		eventRelease(uintptr(obj))
 	}
 	return nil
 }
@@ -161,7 +171,7 @@ func (h *EventHandler) Token() int64 {
 }
 
 func newEventHandlerObject(handle, objectHandle uintptr) (unsafe.Pointer, unsafe.Pointer) {
-	objSize := uintptr(8 + 8 + 8 + 16) // vtable, callback handle, object handle, captured IID
+	objSize := eventCapturedIIDOffset + eventGUIDSize
 	obj := heapAlloc(objSize)
 	if obj == nil {
 		return nil, nil
@@ -178,8 +188,9 @@ func newEventHandlerObject(handle, objectHandle uintptr) (unsafe.Pointer, unsafe
 	*(*uintptr)(unsafe.Add(vtbl, 24)) = _eventInvokeCB
 
 	*(*uintptr)(obj) = uintptr(vtbl)
-	*(*uintptr)(unsafe.Add(obj, 8)) = handle
-	*(*uintptr)(unsafe.Add(obj, 16)) = objectHandle
+	*(*uintptr)(unsafe.Add(obj, eventCallbackHandleOffset)) = handle
+	*(*uintptr)(unsafe.Add(obj, eventObjectHandleOffset)) = objectHandle
+	*(*int64)(unsafe.Add(obj, eventRefCountOffset)) = 1
 	return obj, vtbl
 }
 
@@ -189,17 +200,15 @@ func eventQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
 	}
 	g := (*GUID)(unsafe.Pointer(riid))
 	if isSameGUID(g, IID_IUnknown) || isSameGUID(g, IID_IAgileObject) {
-		*(*uintptr)(unsafe.Pointer(ppv)) = self
-		return 0
+		return eventQueryInterfaceOK(self, ppv)
 	}
 
-	objectHandle := *(*uintptr)(unsafe.Pointer(self + 16))
+	objectHandle := *(*uintptr)(unsafe.Pointer(self + eventObjectHandleOffset))
 	if objectHandle != 0 {
 		if h, ok := cgo.Handle(objectHandle).Value().(*EventHandler); ok {
 			for _, accepted := range h.accepted {
 				if isSameGUID(g, accepted) {
-					*(*uintptr)(unsafe.Pointer(ppv)) = self
-					return 0
+					return eventQueryInterfaceOK(self, ppv)
 				}
 			}
 			if len(h.accepted) > 0 {
@@ -209,29 +218,47 @@ func eventQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
 		}
 	}
 
-	capturedPtr := (*GUID)(unsafe.Pointer(self + 24))
+	capturedPtr := (*GUID)(unsafe.Pointer(self + eventCapturedIIDOffset))
 	if capturedPtr.Data1 == 0 && capturedPtr.Data2 == 0 && capturedPtr.Data3 == 0 {
 		*capturedPtr = *g
 	}
 	if isSameGUID(g, capturedPtr) {
-		*(*uintptr)(unsafe.Pointer(ppv)) = self
-		return 0
+		return eventQueryInterfaceOK(self, ppv)
 	}
 
 	*(*uintptr)(unsafe.Pointer(ppv)) = 0
 	return 0x80004002 // E_NOINTERFACE
 }
 
+func eventQueryInterfaceOK(self uintptr, ppv uintptr) uintptr {
+	eventAddRef(self)
+	*(*uintptr)(unsafe.Pointer(ppv)) = self
+	return 0
+}
+
 func eventAddRef(self uintptr) uintptr {
-	return 1
+	if self == 0 {
+		return 0
+	}
+	return uintptr(atomic.AddInt64(eventRefCountPtr(self), 1))
 }
 
 func eventRelease(self uintptr) uintptr {
-	return 1
+	if self == 0 {
+		return 0
+	}
+	ref := atomic.AddInt64(eventRefCountPtr(self), -1)
+	if ref == 0 {
+		freeEventHandlerObject(self)
+	}
+	if ref < 0 {
+		return 0
+	}
+	return uintptr(ref)
 }
 
 func eventInvoke(self uintptr, sender uintptr, args uintptr) uintptr {
-	handle := *(*uintptr)(unsafe.Pointer(self + 8))
+	handle := *(*uintptr)(unsafe.Pointer(self + eventCallbackHandleOffset))
 	if handle == 0 {
 		return 0
 	}
@@ -242,4 +269,29 @@ func eventInvoke(self uintptr, sender uintptr, args uintptr) uintptr {
 	}
 	callback(unsafe.Pointer(sender), unsafe.Pointer(args))
 	return 0
+}
+
+func eventRefCountPtr(self uintptr) *int64 {
+	return (*int64)(unsafe.Pointer(self + eventRefCountOffset))
+}
+
+func freeEventHandlerObject(self uintptr) {
+	handle := *(*uintptr)(unsafe.Pointer(self + eventCallbackHandleOffset))
+	if handle != 0 {
+		cgo.Handle(handle).Delete()
+		*(*uintptr)(unsafe.Pointer(self + eventCallbackHandleOffset)) = 0
+	}
+
+	objectHandle := *(*uintptr)(unsafe.Pointer(self + eventObjectHandleOffset))
+	if objectHandle != 0 {
+		cgo.Handle(objectHandle).Delete()
+		*(*uintptr)(unsafe.Pointer(self + eventObjectHandleOffset)) = 0
+	}
+
+	vtbl := *(*uintptr)(unsafe.Pointer(self))
+	if vtbl != 0 {
+		*(*uintptr)(unsafe.Pointer(self)) = 0
+		heapFree(unsafe.Pointer(vtbl))
+	}
+	heapFree(unsafe.Pointer(self))
 }
