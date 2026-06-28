@@ -5,6 +5,7 @@ package winrt
 import (
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -37,11 +38,55 @@ func TestEventHandlerCloseKeepsExternalReferenceAlive(t *testing.T) {
 	eventRelease(ppv)
 
 	eventInvoke(obj, 0, 0)
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("callback calls = %d, want 1", got)
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("callback calls = %d, want no calls after Close", got)
 	}
 
 	eventRelease(obj)
+}
+
+func TestEventHandlerCloseWaitsForInflightCallback(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls int32
+
+	h := NewEventHandler(func(sender, args unsafe.Pointer) {
+		close(entered)
+		<-release
+		atomic.AddInt32(&calls, 1)
+	})
+	if h.obj == nil {
+		t.Fatal("event handler object was not allocated")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		eventInvoke(uintptr(h.obj), 0, 0)
+		close(done)
+	}()
+	<-entered
+
+	closed := make(chan struct{})
+	go func() {
+		if err := h.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		close(closed)
+	}()
+
+	select {
+	case <-closed:
+		t.Fatal("Close returned before the in-flight callback finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	<-done
+	<-closed
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("callback calls = %d, want 1", got)
+	}
 }
 
 func queryEventInterface(t *testing.T, obj uintptr, iid *GUID) uintptr {

@@ -7,44 +7,56 @@ import "C"
 import (
 	"fmt"
 	"runtime"
-	"sync/atomic"
+	"sync"
 )
 
 // ---- MTA Initialization (for Monitor and Control modules) ----
 
 var (
-	mtaInits atomic.Int32
-	roInits  atomic.Int32
-	coInits  atomic.Int32
+	mtaMu      sync.Mutex
+	mtaThreads = make(map[uint32]*mtaThreadState)
 )
+
+type mtaThreadState struct {
+	refs int
+	co   bool
+	ro   bool
+}
 
 // InitMTA initializes COM/WinRT on the calling thread in MTA mode.
 //
 // Tries CoInitializeEx first (like go-libnp), then RoInitialize as fallback.
 func InitMTA() error {
+	tid := uint32(C.GetCurrentThreadId())
+	mtaMu.Lock()
+	if state := mtaThreads[tid]; state != nil {
+		state.refs++
+		mtaMu.Unlock()
+		return nil
+	}
+	mtaMu.Unlock()
+
 	// Try classic COM init first (COINIT_MULTITHREADED = 0)
 	hr := C.CoInitializeEx(nil, 0)
 	if hr >= 0 {
-		coInits.Add(1)
-		mtaInits.Add(1)
+		mtaStoreThreadState(tid, &mtaThreadState{refs: 1, co: true})
 		return nil
 	}
 	// Fall back to RoInitialize. RPC_E_CHANGED_MODE means this thread is already
 	// initialized for another apartment; WinRT activation can still be used from
 	// that thread, so treat it as an attach that needs no uninitialize call here.
 	if uint32(hr) == 0x80010106 {
-		mtaInits.Add(1)
+		mtaStoreThreadState(tid, &mtaThreadState{refs: 1})
 		return nil
 	}
 
 	roHR := C.RoInitialize(C.RO_INIT_MULTITHREADED)
 	if roHR >= 0 {
-		roInits.Add(1)
-		mtaInits.Add(1)
+		mtaStoreThreadState(tid, &mtaThreadState{refs: 1, ro: true})
 		return nil
 	}
 	if uint32(roHR) == 0x80010106 {
-		mtaInits.Add(1)
+		mtaStoreThreadState(tid, &mtaThreadState{refs: 1})
 		return nil
 	}
 	return hresultError("COM/WinRT init (MTA)", roHR)
@@ -52,18 +64,34 @@ func InitMTA() error {
 
 // UninitMTA uninitializes COM/WinRT on the calling thread.
 func UninitMTA() {
-	if mtaInits.Load() > 0 {
-		mtaInits.Add(-1)
+	tid := uint32(C.GetCurrentThreadId())
+	mtaMu.Lock()
+	state := mtaThreads[tid]
+	if state == nil {
+		mtaMu.Unlock()
+		return
 	}
-	if coInits.Load() > 0 {
-		coInits.Add(-1)
+	state.refs--
+	if state.refs > 0 {
+		mtaMu.Unlock()
+		return
+	}
+	delete(mtaThreads, tid)
+	mtaMu.Unlock()
+
+	if state.co {
 		C.CoUninitialize()
 		return
 	}
-	if roInits.Load() > 0 {
-		roInits.Add(-1)
+	if state.ro {
 		C.RoUninitialize()
 	}
+}
+
+func mtaStoreThreadState(tid uint32, state *mtaThreadState) {
+	mtaMu.Lock()
+	mtaThreads[tid] = state
+	mtaMu.Unlock()
 }
 
 // ---- STA Initialization (for Create module) ----

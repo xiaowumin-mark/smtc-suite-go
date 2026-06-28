@@ -4,6 +4,8 @@ package winrt
 
 import (
 	"fmt"
+	"runtime/cgo"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -46,6 +48,13 @@ type completionHandler struct {
 	ch  chan asyncStatus
 }
 
+const (
+	asyncHandlerRefCountOffset    = uintptr(8)
+	asyncHandlerCapturedIIDOffset = uintptr(16)
+	asyncHandlerHandleOffset      = uintptr(32)
+	asyncHandlerGUIDSize          = uintptr(16)
+)
+
 // Global Go-callable functions for the handler vtable (used via syscall.NewCallback)
 var (
 	_qicb   = syscall.NewCallback(handlerQueryInterface)
@@ -63,28 +72,32 @@ func handlerQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
 	// IUnknown: {00000000-0000-0000-C000-000000000046}
 	unknownIID := GUID{0, 0, 0, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
 	if isSameGUID(g, &unknownIID) {
+		handlerAddRef(self)
 		*(*uintptr)(unsafe.Pointer(ppv)) = self
 		return 0
 	}
 	// IInspectable: {AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90}
 	inspectIID := GUID{0xAF86E2E0, 0xB12D, 0x4C6A, [8]byte{0x9C, 0x5A, 0xD7, 0xAA, 0x65, 0x10, 0x1E, 0x90}}
 	if isSameGUID(g, &inspectIID) {
+		handlerAddRef(self)
 		*(*uintptr)(unsafe.Pointer(ppv)) = self
 		return 0
 	}
 	if isSameGUID(g, IID_IAgileObject) {
+		handlerAddRef(self)
 		*(*uintptr)(unsafe.Pointer(ppv)) = self
 		return 0
 	}
 
 	// Store the first non-standard IID per handler instance, then accept
 	// subsequent queries for that same parameterized handler IID.
-	capturedPtr := (*GUID)(unsafe.Pointer(self + 16))
+	capturedPtr := (*GUID)(unsafe.Pointer(self + asyncHandlerCapturedIIDOffset))
 	if capturedPtr.Data1 == 0 && capturedPtr.Data2 == 0 && capturedPtr.Data3 == 0 {
 		// First non-standard IID — capture it
 		*capturedPtr = *g
 	}
 	if isSameGUID(g, capturedPtr) {
+		handlerAddRef(self)
 		*(*uintptr)(unsafe.Pointer(ppv)) = self
 		return 0
 	}
@@ -112,20 +125,37 @@ func isSameGUID(a, b *GUID) bool {
 }
 
 func handlerAddRef(self uintptr) uintptr {
-	return 1 // dummy
+	if self == 0 {
+		return 0
+	}
+	return uintptr(atomic.AddInt64(asyncHandlerRefCountPtr(self), 1))
 }
 
 func handlerRelease(self uintptr) uintptr {
-	return 1 // dummy
+	if self == 0 {
+		return 0
+	}
+	ref := atomic.AddInt64(asyncHandlerRefCountPtr(self), -1)
+	if ref == 0 {
+		freeCompletionHandlerObject(self)
+	}
+	if ref < 0 {
+		return 0
+	}
+	return uintptr(ref)
 }
 
 func handlerInvoke(self uintptr, operation uintptr, status int32) uintptr {
-	handle := *(*uintptr)(unsafe.Pointer(self + unsafe.Sizeof(uintptr(0)) + 8 + 16))
+	handlerAddRef(self)
+	defer handlerRelease(self)
+
+	handle := *(*uintptr)(unsafe.Pointer(self + asyncHandlerHandleOffset))
 	if handle != 0 {
-		h := (*completionHandler)(unsafe.Pointer(handle))
-		select {
-		case h.ch <- asyncStatus(status):
-		default:
+		if h, ok := cgo.Handle(handle).Value().(*completionHandler); ok {
+			select {
+			case h.ch <- asyncStatus(status):
+			default:
+			}
 		}
 	}
 	return 0
@@ -153,12 +183,14 @@ func newCompletionHandler() *completionHandler {
 	h := &completionHandler{
 		ch: make(chan asyncStatus, 1),
 	}
+	handle := cgo.NewHandle(h)
 
 	// Allocate vtable + object from process heap
-	// Object layout: [vtable_ptr] [refCount|padding] [capturedIID] [go handler pointer]
-	objSize := unsafe.Sizeof(uintptr(0)) + 8 + 16 + unsafe.Sizeof(uintptr(0))
+	// Object layout: [vtable_ptr] [refCount] [capturedIID] [cgo.Handle]
+	objSize := asyncHandlerHandleOffset + unsafe.Sizeof(uintptr(0))
 	objPtr := heapAlloc(objSize)
 	if objPtr == nil {
+		handle.Delete()
 		return nil
 	}
 
@@ -167,6 +199,7 @@ func newCompletionHandler() *completionHandler {
 	vtPtr := heapAlloc(vtSize)
 	if vtPtr == nil {
 		heapFree(objPtr)
+		handle.Delete()
 		return nil
 	}
 
@@ -177,7 +210,8 @@ func newCompletionHandler() *completionHandler {
 
 	// Object points to vtable
 	*(*uintptr)(objPtr) = uintptr(vtPtr)
-	*(*uintptr)(unsafe.Add(objPtr, unsafe.Sizeof(uintptr(0))+8+16)) = uintptr(unsafe.Pointer(h))
+	*(*int64)(unsafe.Add(objPtr, asyncHandlerRefCountOffset)) = 1
+	*(*uintptr)(unsafe.Add(objPtr, asyncHandlerHandleOffset)) = uintptr(handle)
 
 	h.obj = uintptr(objPtr)
 
@@ -190,13 +224,28 @@ func (h *completionHandler) ptr() uintptr {
 
 func (h *completionHandler) close() {
 	if h.obj != 0 {
-		vtPtr := *(*uintptr)(unsafe.Pointer(h.obj))
-		if vtPtr != 0 {
-			heapFree(unsafe.Pointer(vtPtr))
-		}
-		heapFree(unsafe.Pointer(h.obj))
+		handlerRelease(h.obj)
 		h.obj = 0
 	}
+}
+
+func asyncHandlerRefCountPtr(self uintptr) *int64 {
+	return (*int64)(unsafe.Pointer(self + asyncHandlerRefCountOffset))
+}
+
+func freeCompletionHandlerObject(self uintptr) {
+	handle := *(*uintptr)(unsafe.Pointer(self + asyncHandlerHandleOffset))
+	if handle != 0 {
+		cgo.Handle(handle).Delete()
+		*(*uintptr)(unsafe.Pointer(self + asyncHandlerHandleOffset)) = 0
+	}
+
+	vtbl := *(*uintptr)(unsafe.Pointer(self))
+	if vtbl != 0 {
+		*(*uintptr)(unsafe.Pointer(self)) = 0
+		heapFree(unsafe.Pointer(vtbl))
+	}
+	heapFree(unsafe.Pointer(self))
 }
 
 // ---- AsyncOperation ----

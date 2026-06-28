@@ -28,6 +28,7 @@ import (
 // EventHandler manages a WinRT event subscription.
 type EventHandler struct {
 	mu           sync.Mutex
+	cond         *sync.Cond
 	obj          unsafe.Pointer // C-allocated COM object (ITypedEventHandler)
 	vtbl         unsafe.Pointer
 	token        int64
@@ -39,6 +40,7 @@ type EventHandler struct {
 	objectHandle cgo.Handle // handle to EventHandler
 	handle       cgo.Handle // handle to Go callback
 	closed       bool
+	inflight     int
 }
 
 var (
@@ -70,6 +72,7 @@ func NewTypedEventHandler(accepted []*GUID, callback func(sender, args unsafe.Po
 		accepted: accepted,
 		handle:   h,
 	}
+	ev.cond = sync.NewCond(&ev.mu)
 	ev.objectHandle = cgo.NewHandle(ev)
 	ev.obj, ev.vtbl = newEventHandlerObject(uintptr(h), uintptr(ev.objectHandle))
 	if ev.obj == nil {
@@ -116,27 +119,14 @@ func (h *EventHandler) Register(source unsafe.Pointer, addSlot, removeSlot int) 
 
 // Unregister removes the event subscription.
 func (h *EventHandler) Unregister() error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.unregisterLocked()
-}
-
-func (h *EventHandler) unregisterLocked() error {
-	if !h.registered {
+	source, removeSlot, token, ok := h.takeRegistration()
+	if !ok {
 		return nil
 	}
-
-	fn := vtableFn(h.source, h.removeSlot)
-	var token = h.token
-	r1, _, _ := syscall.SyscallN(fn,
-		uintptr(h.source),
-		uintptr(unsafe.Pointer(&token)),
-	)
-	if int32(r1) < 0 {
-		return hresultErrorInt("remove_EventHandler", int32(r1))
+	if err := removeEventRegistration(source, removeSlot, token); err != nil {
+		h.restoreRegistration()
+		return err
 	}
-
-	h.registered = false
 	return nil
 }
 
@@ -147,22 +137,29 @@ func (h *EventHandler) Close() error {
 		h.mu.Unlock()
 		return nil
 	}
-	if err := h.unregisterLocked(); err != nil {
-		h.mu.Unlock()
-		return err
-	}
 	h.closed = true
+	source, removeSlot, token, registered := h.registrationLocked()
+	h.registered = false
+	h.mu.Unlock()
+
+	var err error
+	if registered {
+		err = removeEventRegistration(source, removeSlot, token)
+	}
+
+	h.mu.Lock()
+	for h.inflight > 0 {
+		h.cond.Wait()
+	}
 	obj := h.obj
 	h.obj = nil
 	h.vtbl = nil
-	h.handle = 0
-	h.objectHandle = 0
 	h.mu.Unlock()
 
 	if obj != nil {
 		eventRelease(uintptr(obj))
 	}
-	return nil
+	return err
 }
 
 // Token returns the EventRegistrationToken.
@@ -258,6 +255,19 @@ func eventRelease(self uintptr) uintptr {
 }
 
 func eventInvoke(self uintptr, sender uintptr, args uintptr) uintptr {
+	eventAddRef(self)
+	defer eventRelease(self)
+
+	objectHandle := *(*uintptr)(unsafe.Pointer(self + eventObjectHandleOffset))
+	if objectHandle == 0 {
+		return 0
+	}
+	h, ok := cgo.Handle(objectHandle).Value().(*EventHandler)
+	if !ok || !h.beginInvoke() {
+		return 0
+	}
+	defer h.endInvoke()
+
 	handle := *(*uintptr)(unsafe.Pointer(self + eventCallbackHandleOffset))
 	if handle == 0 {
 		return 0
@@ -269,6 +279,63 @@ func eventInvoke(self uintptr, sender uintptr, args uintptr) uintptr {
 	}
 	callback(unsafe.Pointer(sender), unsafe.Pointer(args))
 	return 0
+}
+
+func (h *EventHandler) beginInvoke() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return false
+	}
+	h.inflight++
+	return true
+}
+
+func (h *EventHandler) endInvoke() {
+	h.mu.Lock()
+	h.inflight--
+	if h.inflight == 0 {
+		h.cond.Broadcast()
+	}
+	h.mu.Unlock()
+}
+
+func (h *EventHandler) takeRegistration() (unsafe.Pointer, int, int64, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.registered {
+		return nil, 0, 0, false
+	}
+	source, removeSlot, token, ok := h.registrationLocked()
+	h.registered = false
+	return source, removeSlot, token, ok
+}
+
+func (h *EventHandler) restoreRegistration() {
+	h.mu.Lock()
+	if !h.closed {
+		h.registered = true
+	}
+	h.mu.Unlock()
+}
+
+func (h *EventHandler) registrationLocked() (unsafe.Pointer, int, int64, bool) {
+	if !h.registered || h.source == nil {
+		return nil, 0, 0, false
+	}
+	return h.source, h.removeSlot, h.token, true
+}
+
+func removeEventRegistration(source unsafe.Pointer, removeSlot int, token int64) error {
+	fn := vtableFn(source, removeSlot)
+	r1, _, _ := syscall.SyscallN(fn,
+		uintptr(source),
+		uintptr(unsafe.Pointer(&token)),
+	)
+	if int32(r1) < 0 {
+		return hresultErrorInt("remove_EventHandler", int32(r1))
+	}
+	return nil
 }
 
 func eventRefCountPtr(self uintptr) *int64 {

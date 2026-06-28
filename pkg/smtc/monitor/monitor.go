@@ -5,6 +5,7 @@ package monitor
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 	"unsafe"
@@ -16,6 +17,7 @@ import (
 
 // Monitor watches system-wide SMTC sessions.
 type Monitor struct {
+	worker  *winrt.MTAWorker
 	mu      sync.Mutex
 	closed  bool
 	manager unsafe.Pointer
@@ -49,49 +51,26 @@ func New(cfg *Config) (*Monitor, error) {
 		workBuf = 64
 	}
 
-	if err := winrt.InitMTA(); err != nil {
+	worker, err := winrt.NewMTAWorker()
+	if err != nil {
 		return nil, fmt.Errorf("monitor: %w", err)
 	}
 
-	factory, err := winrt.GetActivationFactory(
-		smtcvt.RuntimeClass_GlobalSystemMediaTransportControlsSessionManager,
-		winrt.IID_IGSMTCSessionManagerStatics,
-	)
-	if err != nil {
-		winrt.UninitMTA()
-		return nil, fmt.Errorf("monitor: get activation factory: %w", err)
-	}
-	defer winrt.Release(factory)
-
-	asyncPtr, err := winrt.VtableGetPtr(factory, smtcvt.Slot_ManagerStatics_RequestAsync)
-	if err != nil {
-		winrt.UninitMTA()
-		return nil, fmt.Errorf("monitor: RequestAsync: %w", err)
-	}
-
-	asyncOp := winrt.NewAsyncOperation(asyncPtr)
-	managerPtr, err := asyncOp.Wait()
-	if err != nil {
-		asyncOp.Release()
-		winrt.UninitMTA()
-		return nil, fmt.Errorf("monitor: wait for session manager: %w", err)
-	}
-	asyncOp.Release()
-
 	m := &Monitor{
-		manager:       managerPtr,
+		worker:        worker,
 		managerEvents: make(chan ManagerEvent, buf),
 		sessions:      make(map[string]*sessionInfo),
 		workCh:        make(chan monitorWork, workBuf),
 		doneCh:        make(chan struct{}),
 	}
 
-	if _, err := m.refreshSessions(true); err != nil {
-		m.Close()
-		return nil, err
-	}
-	if err := m.registerManagerEvents(); err != nil {
-		m.Close()
+	if err := worker.Do(m.init); err != nil {
+		m.mu.Lock()
+		m.closed = true
+		m.mu.Unlock()
+		_ = worker.Do(m.closeWinRT)
+		worker.Close()
+		close(m.managerEvents)
 		return nil, err
 	}
 
@@ -99,6 +78,41 @@ func New(cfg *Config) (*Monitor, error) {
 	go m.eventLoop()
 
 	return m, nil
+}
+
+func (m *Monitor) init() error {
+	factory, err := winrt.GetActivationFactory(
+		smtcvt.RuntimeClass_GlobalSystemMediaTransportControlsSessionManager,
+		winrt.IID_IGSMTCSessionManagerStatics,
+	)
+	if err != nil {
+		return fmt.Errorf("monitor: get activation factory: %w", err)
+	}
+	defer winrt.Release(factory)
+
+	asyncPtr, err := winrt.VtableGetPtr(factory, smtcvt.Slot_ManagerStatics_RequestAsync)
+	if err != nil {
+		return fmt.Errorf("monitor: RequestAsync: %w", err)
+	}
+
+	asyncOp := winrt.NewAsyncOperation(asyncPtr)
+	managerPtr, err := asyncOp.Wait()
+	if err != nil {
+		asyncOp.Release()
+		return fmt.Errorf("monitor: wait for session manager: %w", err)
+	}
+	asyncOp.Release()
+
+	m.manager = managerPtr
+
+	if _, err := m.refreshSessions(true); err != nil {
+		return err
+	}
+	if err := m.registerManagerEvents(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Sessions returns a snapshot of all current sessions.
@@ -110,6 +124,15 @@ func (m *Monitor) Sessions() []smtc.SessionInfo {
 
 // CurrentSession returns the current active session, or nil if none.
 func (m *Monitor) CurrentSession() *smtc.SessionInfo {
+	var current *smtc.SessionInfo
+	_ = m.do(func() error {
+		current = m.currentSession()
+		return nil
+	})
+	return current
+}
+
+func (m *Monitor) currentSession() *smtc.SessionInfo {
 	m.mu.Lock()
 	if m.closed || m.manager == nil {
 		m.mu.Unlock()
@@ -154,7 +177,28 @@ func (m *Monitor) Close() error {
 	}
 	m.closed = true
 	close(m.doneCh)
+	worker := m.worker
+	m.mu.Unlock()
 
+	m.wg.Wait()
+
+	var err error
+	if worker != nil {
+		err = worker.Do(m.closeWinRT)
+		worker.Close()
+	}
+
+	m.mu.Lock()
+	if m.worker == worker {
+		m.worker = nil
+	}
+	m.mu.Unlock()
+	close(m.managerEvents)
+	return err
+}
+
+func (m *Monitor) closeWinRT() error {
+	m.mu.Lock()
 	manager := m.manager
 	m.manager = nil
 	sessionsChangedEvent := m.sessionsChangedEvent
@@ -165,16 +209,22 @@ func (m *Monitor) Close() error {
 	m.sessions = make(map[string]*sessionInfo)
 	m.mu.Unlock()
 
+	var errs []error
 	if sessionsChangedEvent != nil {
-		_ = sessionsChangedEvent.Close()
+		if err := sessionsChangedEvent.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close SessionsChanged handler: %w", err))
+		}
 	}
 	if currentChangedEvent != nil {
-		_ = currentChangedEvent.Close()
+		if err := currentChangedEvent.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close CurrentSessionChanged handler: %w", err))
+		}
 	}
 	for _, s := range sessions {
-		s.closeEvents()
+		if err := s.closeEvents(); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	m.wg.Wait()
 	for _, s := range sessions {
 		if s.ptr != nil {
 			winrt.Release(s.ptr)
@@ -183,9 +233,7 @@ func (m *Monitor) Close() error {
 	if manager != nil {
 		winrt.Release(manager)
 	}
-	close(m.managerEvents)
-	winrt.UninitMTA()
-	return nil
+	return errors.Join(errs...)
 }
 
 func (m *Monitor) registerManagerEvents() error {
@@ -229,9 +277,23 @@ func (m *Monitor) eventLoop() {
 		case <-m.doneCh:
 			return
 		case work := <-m.workCh:
-			m.handleWork(work)
+			_ = m.do(func() error {
+				m.handleWork(work)
+				return nil
+			})
 		}
 	}
+}
+
+func (m *Monitor) do(fn func() error) error {
+	m.mu.Lock()
+	if m.closed || m.worker == nil {
+		m.mu.Unlock()
+		return nil
+	}
+	worker := m.worker
+	m.mu.Unlock()
+	return worker.Do(fn)
 }
 
 func (m *Monitor) handleWork(work monitorWork) {
@@ -680,19 +742,27 @@ type sessionInfo struct {
 	mediaEvent    *winrt.EventHandler
 }
 
-func (s *sessionInfo) closeEvents() {
+func (s *sessionInfo) closeEvents() error {
+	var errs []error
 	if s.timelineEvent != nil {
-		_ = s.timelineEvent.Close()
+		if err := s.timelineEvent.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close TimelinePropertiesChanged handler: %w", err))
+		}
 		s.timelineEvent = nil
 	}
 	if s.playbackEvent != nil {
-		_ = s.playbackEvent.Close()
+		if err := s.playbackEvent.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close PlaybackInfoChanged handler: %w", err))
+		}
 		s.playbackEvent = nil
 	}
 	if s.mediaEvent != nil {
-		_ = s.mediaEvent.Close()
+		if err := s.mediaEvent.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close MediaPropertiesChanged handler: %w", err))
+		}
 		s.mediaEvent = nil
 	}
+	return errors.Join(errs...)
 }
 
 type monitorWorkType int

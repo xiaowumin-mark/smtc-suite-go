@@ -17,6 +17,7 @@ import (
 
 // Controller controls a remote SMTC media session.
 type Controller struct {
+	worker  *winrt.MTAWorker
 	mu      sync.Mutex
 	closed  bool
 	session unsafe.Pointer
@@ -24,32 +25,41 @@ type Controller struct {
 
 // New creates a Controller for a specific session, or the current session.
 func New(sessionID string) (*Controller, error) {
-	if err := winrt.InitMTA(); err != nil {
+	worker, err := winrt.NewMTAWorker()
+	if err != nil {
 		return nil, fmt.Errorf("control: %w", err)
 	}
 
+	c := &Controller{worker: worker}
+	if err := worker.Do(func() error {
+		return c.init(sessionID)
+	}); err != nil {
+		worker.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *Controller) init(sessionID string) error {
 	factory, err := winrt.GetActivationFactory(
 		smtcvt.RuntimeClass_GlobalSystemMediaTransportControlsSessionManager,
 		winrt.IID_IGSMTCSessionManagerStatics,
 	)
 	if err != nil {
-		winrt.UninitMTA()
-		return nil, fmt.Errorf("control: get factory: %w", err)
+		return fmt.Errorf("control: get factory: %w", err)
 	}
 	defer winrt.Release(factory)
 
 	asyncPtr, err := winrt.VtableGetPtr(factory, smtcvt.Slot_ManagerStatics_RequestAsync)
 	if err != nil {
-		winrt.UninitMTA()
-		return nil, fmt.Errorf("control: request async: %w", err)
+		return fmt.Errorf("control: request async: %w", err)
 	}
 
 	asyncOp := winrt.NewAsyncOperation(asyncPtr)
 	managerPtr, err := asyncOp.Wait()
 	asyncOp.Release()
 	if err != nil {
-		winrt.UninitMTA()
-		return nil, fmt.Errorf("control: wait for manager: %w", err)
+		return fmt.Errorf("control: wait for manager: %w", err)
 	}
 	defer winrt.Release(managerPtr)
 
@@ -60,11 +70,11 @@ func New(sessionID string) (*Controller, error) {
 		sessionPtr, err = findSession(managerPtr, sessionID)
 	}
 	if err != nil || sessionPtr == nil {
-		winrt.UninitMTA()
-		return nil, fmt.Errorf("control: session not found")
+		return fmt.Errorf("control: session not found")
 	}
 
-	return &Controller{session: sessionPtr}, nil
+	c.session = sessionPtr
+	return nil
 }
 
 func findSession(managerPtr unsafe.Pointer, sessionID string) (unsafe.Pointer, error) {
@@ -96,40 +106,58 @@ func findSession(managerPtr unsafe.Pointer, sessionID string) (unsafe.Pointer, e
 }
 
 // Play sends a play command.
-func (c *Controller) Play() error { return c.asyncBool(smtcvt.Slot_Session_TryPlayAsync) }
+func (c *Controller) Play() error {
+	return c.do(func() error { return c.asyncBool(smtcvt.Slot_Session_TryPlayAsync) })
+}
 
 // Pause sends a pause command.
-func (c *Controller) Pause() error { return c.asyncBool(smtcvt.Slot_Session_TryPauseAsync) }
+func (c *Controller) Pause() error {
+	return c.do(func() error { return c.asyncBool(smtcvt.Slot_Session_TryPauseAsync) })
+}
 
 // TogglePlayPause toggles between play and pause.
 func (c *Controller) TogglePlayPause() error {
-	return c.asyncBool(smtcvt.Slot_Session_TryTogglePlayPauseAsync)
+	return c.do(func() error { return c.asyncBool(smtcvt.Slot_Session_TryTogglePlayPauseAsync) })
 }
 
 // Stop stops playback.
-func (c *Controller) Stop() error { return c.asyncBool(smtcvt.Slot_Session_TryStopAsync) }
+func (c *Controller) Stop() error {
+	return c.do(func() error { return c.asyncBool(smtcvt.Slot_Session_TryStopAsync) })
+}
 
 // Next skips to the next track.
-func (c *Controller) Next() error { return c.asyncBool(smtcvt.Slot_Session_TrySkipNextAsync) }
+func (c *Controller) Next() error {
+	return c.do(func() error { return c.asyncBool(smtcvt.Slot_Session_TrySkipNextAsync) })
+}
 
 // Previous goes to the previous track.
-func (c *Controller) Previous() error { return c.asyncBool(smtcvt.Slot_Session_TrySkipPreviousAsync) }
+func (c *Controller) Previous() error {
+	return c.do(func() error { return c.asyncBool(smtcvt.Slot_Session_TrySkipPreviousAsync) })
+}
 
 // FastForward starts fast-forwarding.
-func (c *Controller) FastForward() error { return c.asyncBool(smtcvt.Slot_Session_TryFastForwardAsync) }
+func (c *Controller) FastForward() error {
+	return c.do(func() error { return c.asyncBool(smtcvt.Slot_Session_TryFastForwardAsync) })
+}
 
 // Rewind starts rewinding.
-func (c *Controller) Rewind() error { return c.asyncBool(smtcvt.Slot_Session_TryRewindAsync) }
+func (c *Controller) Rewind() error {
+	return c.do(func() error { return c.asyncBool(smtcvt.Slot_Session_TryRewindAsync) })
+}
 
 // Seek moves the playback position.
 func (c *Controller) Seek(position time.Duration) error {
 	ticks := smtc.DurationToTicks(position)
-	return c.asyncBoolWithArg(smtcvt.Slot_Session_TryChangePlaybackPositionAsync, uintptr(ticks))
+	return c.do(func() error {
+		return c.asyncBoolWithArg(smtcvt.Slot_Session_TryChangePlaybackPositionAsync, uintptr(ticks))
+	})
 }
 
 // SetPlaybackRate changes the playback rate.
 func (c *Controller) SetPlaybackRate(rate float64) error {
-	return c.asyncBoolWithFloat(smtcvt.Slot_Session_TryChangePlaybackRateAsync, rate)
+	return c.do(func() error {
+		return c.asyncBoolWithFloat(smtcvt.Slot_Session_TryChangePlaybackRateAsync, rate)
+	})
 }
 
 // SetShuffle enables or disables shuffle mode.
@@ -138,16 +166,30 @@ func (c *Controller) SetShuffle(active bool) error {
 	if active {
 		v = 1
 	}
-	return c.asyncBoolWithArg(smtcvt.Slot_Session_TryChangeShuffleActiveAsync, v)
+	return c.do(func() error {
+		return c.asyncBoolWithArg(smtcvt.Slot_Session_TryChangeShuffleActiveAsync, v)
+	})
 }
 
 // SetRepeatMode sets the repeat mode.
 func (c *Controller) SetRepeatMode(mode smtc.AutoRepeatMode) error {
-	return c.asyncBoolWithArg(smtcvt.Slot_Session_TryChangeAutoRepeatModeAsync, uintptr(mode))
+	return c.do(func() error {
+		return c.asyncBoolWithArg(smtcvt.Slot_Session_TryChangeAutoRepeatModeAsync, uintptr(mode))
+	})
 }
 
 // MediaInfo returns the current media metadata for the controlled session.
 func (c *Controller) MediaInfo() (smtc.MediaInfo, error) {
+	var info smtc.MediaInfo
+	err := c.do(func() error {
+		var err error
+		info, err = c.mediaInfo()
+		return err
+	})
+	return info, err
+}
+
+func (c *Controller) mediaInfo() (smtc.MediaInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -179,20 +221,49 @@ func (c *Controller) MediaInfo() (smtc.MediaInfo, error) {
 // Close releases the controller.
 func (c *Controller) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
 	c.closed = true
-	if c.session != nil {
-		winrt.Release(c.session)
-		c.session = nil
+	worker := c.worker
+	c.mu.Unlock()
+
+	var err error
+	if worker != nil {
+		err = worker.Do(func() error {
+			c.mu.Lock()
+			session := c.session
+			c.session = nil
+			c.mu.Unlock()
+			if session != nil {
+				winrt.Release(session)
+			}
+			return nil
+		})
+		worker.Close()
 	}
-	winrt.UninitMTA()
-	return nil
+
+	c.mu.Lock()
+	if c.worker == worker {
+		c.worker = nil
+	}
+	c.mu.Unlock()
+	return err
 }
 
 // ---- internal helpers ----
+
+func (c *Controller) do(fn func() error) error {
+	c.mu.Lock()
+	if c.closed || c.worker == nil {
+		c.mu.Unlock()
+		return fmt.Errorf("control: closed")
+	}
+	worker := c.worker
+	c.mu.Unlock()
+	return worker.Do(fn)
+}
 
 func fetchMediaInfo(mediaPtr unsafe.Pointer) smtc.MediaInfo {
 	var mi smtc.MediaInfo

@@ -22,11 +22,11 @@ import (
 // SystemMediaTransportControls object alive; closing it releases the WinRT
 // objects and removes the session from the Windows media UI.
 //
-// Methods on Creator are serialized with an internal mutex. The underlying
-// WinRT objects are initialized in an MTA apartment, so this type is intended
-// for normal Go use from application goroutines. Button presses are exposed
+// Methods on Creator are serialized through an internal MTA worker, so callers
+// can use this type from normal Go goroutines. Button presses are exposed
 // through ButtonEvents.
 type Creator struct {
+	worker      *winrt.MTAWorker
 	mu          sync.Mutex
 	closed      bool
 	mediaPlayer unsafe.Pointer
@@ -135,15 +135,20 @@ func New(cfg *Config) (*Creator, error) {
 	}
 	normalizeConfig(cfg)
 
-	if err := winrt.InitMTA(); err != nil {
+	worker, err := winrt.NewMTAWorker()
+	if err != nil {
 		return nil, fmt.Errorf("create: %w", err)
 	}
 
 	c := &Creator{
+		worker:  worker,
 		buttons: make(chan smtc.Button, cfg.ButtonEventBuffer),
 	}
-	if err := c.initWithMediaPlayer(cfg); err != nil {
-		_ = c.Close()
+	if err := worker.Do(func() error {
+		return c.initWithMediaPlayer(cfg)
+	}); err != nil {
+		_ = worker.Do(c.closeWinRT)
+		worker.Close()
 		return nil, err
 	}
 
@@ -245,12 +250,14 @@ func (c *Creator) initWithMediaPlayer(cfg *Config) error {
 // ignore this for MediaPlayer-backed SMTC sessions even when the call succeeds;
 // prefer SetThumbnailFromURI when possible.
 func (c *Creator) SetThumbnailFromFile(path string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.checkOpenLocked(); err != nil {
-		return err
-	}
-	return c.setThumbnailFromFileLocked(path)
+	return c.do(func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err := c.checkOpenLocked(); err != nil {
+			return err
+		}
+		return c.setThumbnailFromFileLocked(path)
+	})
 }
 
 // SetThumbnailFromURI updates the cover artwork from an absolute URI.
@@ -258,12 +265,14 @@ func (c *Creator) SetThumbnailFromFile(path string) error {
 // This matches Windows.Media.Storage.Streams.RandomAccessStreamReference.CreateFromUri
 // and supports https:// and file:/// URIs.
 func (c *Creator) SetThumbnailFromURI(uri string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.checkOpenLocked(); err != nil {
-		return err
-	}
-	return c.setThumbnailFromURILocked(uri)
+	return c.do(func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err := c.checkOpenLocked(); err != nil {
+			return err
+		}
+		return c.setThumbnailFromURILocked(uri)
+	})
 }
 
 func (c *Creator) setThumbnailFromFileLocked(path string) error {
@@ -301,12 +310,14 @@ func (c *Creator) setThumbnailRefLocked(ref unsafe.Pointer) error {
 // uses StartTime and EndTime respectively. PlaybackRate is published when it is
 // non-zero.
 func (c *Creator) SetTimelineInfo(info smtc.TimelineInfo) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.checkOpenLocked(); err != nil {
-		return err
-	}
-	return c.setTimelineInfoLocked(info)
+	return c.do(func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err := c.checkOpenLocked(); err != nil {
+			return err
+		}
+		return c.setTimelineInfoLocked(info)
+	})
 }
 
 func (c *Creator) setTimelineInfoLocked(info smtc.TimelineInfo) error {
@@ -393,12 +404,14 @@ func (c *Creator) registerButtonEventsLocked() error {
 // application is not currently publishing active media controls. Callers can
 // re-enable it later without creating a new Creator.
 func (c *Creator) SetEnabled(enabled bool) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.checkOpenLocked(); err != nil {
-		return err
-	}
-	return c.setEnabledLocked(enabled)
+	return c.do(func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err := c.checkOpenLocked(); err != nil {
+			return err
+		}
+		return c.setEnabledLocked(enabled)
+	})
 }
 
 func (c *Creator) setEnabledLocked(enabled bool) error {
@@ -418,12 +431,14 @@ func (c *Creator) setEnabledLocked(enabled bool) error {
 // true for FastForward, Rewind, Record, ChannelUp, or ChannelDown returns an
 // error instead of touching unverified vtable slots.
 func (c *Creator) SetEnabledButtons(buttons Buttons) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.checkOpenLocked(); err != nil {
-		return err
-	}
-	return c.setEnabledButtonsLocked(buttons)
+	return c.do(func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err := c.checkOpenLocked(); err != nil {
+			return err
+		}
+		return c.setEnabledButtonsLocked(buttons)
+	})
 }
 
 func (c *Creator) setEnabledButtonsLocked(buttons Buttons) error {
@@ -456,12 +471,14 @@ func (c *Creator) setEnabledButtonsLocked(buttons Buttons) error {
 // Closed -> Closed, Opened/Stopped -> Stopped, Changing -> Changing,
 // Playing -> Playing, and Paused -> Paused.
 func (c *Creator) SetPlaybackStatus(status smtc.PlaybackStatus) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.checkOpenLocked(); err != nil {
-		return err
-	}
-	return c.setPlaybackStatusLocked(status)
+	return c.do(func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err := c.checkOpenLocked(); err != nil {
+			return err
+		}
+		return c.setPlaybackStatusLocked(status)
+	})
 }
 
 func (c *Creator) setPlaybackStatusLocked(status smtc.PlaybackStatus) error {
@@ -478,12 +495,14 @@ func (c *Creator) setPlaybackStatusLocked(status smtc.PlaybackStatus) error {
 // are the verified fields currently written. Cover artwork can be updated with
 // SetThumbnailFromFile.
 func (c *Creator) SetMediaInfo(info smtc.MediaInfo) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.checkOpenLocked(); err != nil {
-		return err
-	}
-	return c.setMediaInfoLocked(info, "")
+	return c.do(func() error {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err := c.checkOpenLocked(); err != nil {
+			return err
+		}
+		return c.setMediaInfoLocked(info, "")
+	})
 }
 
 func (c *Creator) setMediaInfoLocked(info smtc.MediaInfo, appMediaID string) error {
@@ -596,6 +615,17 @@ func (c *Creator) checkOpenLocked() error {
 	return nil
 }
 
+func (c *Creator) do(fn func() error) error {
+	c.mu.Lock()
+	if c.closed || c.worker == nil {
+		c.mu.Unlock()
+		return fmt.Errorf("create: closed")
+	}
+	worker := c.worker
+	c.mu.Unlock()
+	return worker.Do(fn)
+}
+
 // Close releases all WinRT objects owned by the Creator.
 //
 // Close is idempotent. After Close returns, the Creator must not be used again.
@@ -603,37 +633,62 @@ func (c *Creator) checkOpenLocked() error {
 // COM references are released.
 func (c *Creator) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
 	c.closed = true
-	var errs []error
-	if c.buttonEvent != nil {
-		if err := c.buttonEvent.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close ButtonPressed handler: %w", err))
-		}
-		c.buttonEvent = nil
+	worker := c.worker
+	c.mu.Unlock()
+
+	var err error
+	if worker != nil {
+		err = worker.Do(c.closeWinRT)
+		worker.Close()
 	}
-	if c.display != nil {
-		winrt.Release(c.display)
-		c.display = nil
+
+	c.mu.Lock()
+	if c.worker == worker {
+		c.worker = nil
 	}
-	if c.smtc2 != nil {
-		winrt.Release(c.smtc2)
-		c.smtc2 = nil
-	}
-	if c.smtc != nil {
-		winrt.Release(c.smtc)
-		c.smtc = nil
-	}
-	if c.mediaPlayer != nil {
-		winrt.Release(c.mediaPlayer)
-		c.mediaPlayer = nil
-	}
-	winrt.UninitMTA()
-	if len(errs) > 0 {
-		return fmt.Errorf("create: close: %w", errors.Join(errs...))
+	c.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("create: close: %w", err)
 	}
 	return nil
+}
+
+func (c *Creator) closeWinRT() error {
+	c.mu.Lock()
+	buttonEvent := c.buttonEvent
+	c.buttonEvent = nil
+	display := c.display
+	c.display = nil
+	smtc2 := c.smtc2
+	c.smtc2 = nil
+	smtcPtr := c.smtc
+	c.smtc = nil
+	mediaPlayer := c.mediaPlayer
+	c.mediaPlayer = nil
+	c.mu.Unlock()
+
+	var errs []error
+	if buttonEvent != nil {
+		if err := buttonEvent.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close ButtonPressed handler: %w", err))
+		}
+	}
+	if display != nil {
+		winrt.Release(display)
+	}
+	if smtc2 != nil {
+		winrt.Release(smtc2)
+	}
+	if smtcPtr != nil {
+		winrt.Release(smtcPtr)
+	}
+	if mediaPlayer != nil {
+		winrt.Release(mediaPlayer)
+	}
+	return errors.Join(errs...)
 }
