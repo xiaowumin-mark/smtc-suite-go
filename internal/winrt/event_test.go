@@ -89,6 +89,26 @@ func TestEventHandlerCloseWaitsForInflightCallback(t *testing.T) {
 	}
 }
 
+func TestEventHandlerRejectsIInspectable(t *testing.T) {
+	h := NewEventHandler(func(sender, args unsafe.Pointer) {})
+	if h.obj == nil {
+		t.Fatal("event handler object was not allocated")
+	}
+	defer h.Close()
+
+	var ppv uintptr
+	hr := eventQueryInterface(uintptr(h.obj), uintptr(unsafe.Pointer(IID_IInspectable)), uintptr(unsafe.Pointer(&ppv)))
+	if uint32(hr) != 0x80004002 {
+		t.Fatalf("QueryInterface(IInspectable) HRESULT = 0x%08X, want E_NOINTERFACE", uint32(hr))
+	}
+	if ppv != 0 {
+		t.Fatalf("QueryInterface(IInspectable) returned %#x, want nil", ppv)
+	}
+
+	ppv = queryEventInterface(t, uintptr(h.obj), IID_ITypedEventHandler_GSMTCSessionManager_SessionsChangedEventArgs)
+	eventRelease(ppv)
+}
+
 func queryEventInterface(t *testing.T, obj uintptr, iid *GUID) uintptr {
 	t.Helper()
 	var ppv uintptr

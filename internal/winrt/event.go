@@ -210,6 +210,10 @@ func eventQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
 	if isSameGUID(g, IID_IUnknown) || isSameGUID(g, IID_IAgileObject) {
 		return eventQueryInterfaceOK(self, ppv)
 	}
+	if isSameGUID(g, IID_IInspectable) {
+		*(*uintptr)(unsafe.Pointer(ppv)) = 0
+		return 0x80004002 // E_NOINTERFACE
+	}
 
 	objectHandle := *(*uintptr)(unsafe.Pointer(self + eventObjectHandleOffset))
 	if objectHandle != 0 {

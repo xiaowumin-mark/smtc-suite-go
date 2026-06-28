@@ -69,16 +69,7 @@ func handlerQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
 	}
 	g := (*GUID)(unsafe.Pointer(riid))
 
-	// IUnknown: {00000000-0000-0000-C000-000000000046}
-	unknownIID := GUID{0, 0, 0, [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}
-	if isSameGUID(g, &unknownIID) {
-		handlerAddRef(self)
-		*(*uintptr)(unsafe.Pointer(ppv)) = self
-		return 0
-	}
-	// IInspectable: {AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90}
-	inspectIID := GUID{0xAF86E2E0, 0xB12D, 0x4C6A, [8]byte{0x9C, 0x5A, 0xD7, 0xAA, 0x65, 0x10, 0x1E, 0x90}}
-	if isSameGUID(g, &inspectIID) {
+	if isSameGUID(g, IID_IUnknown) {
 		handlerAddRef(self)
 		*(*uintptr)(unsafe.Pointer(ppv)) = self
 		return 0
@@ -87,6 +78,10 @@ func handlerQueryInterface(self uintptr, riid uintptr, ppv uintptr) uintptr {
 		handlerAddRef(self)
 		*(*uintptr)(unsafe.Pointer(ppv)) = self
 		return 0
+	}
+	if isSameGUID(g, IID_IInspectable) {
+		*(*uintptr)(unsafe.Pointer(ppv)) = 0
+		return 0x80004002 // E_NOINTERFACE
 	}
 
 	// Store the first non-standard IID per handler instance, then accept
