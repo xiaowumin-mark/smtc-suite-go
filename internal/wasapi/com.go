@@ -7,11 +7,24 @@ import "C"
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
 )
 
 var vtableSlotSize = unsafe.Sizeof(uintptr(0))
+
+const rpcEChangedMode = 0x80010106
+
+var (
+	comMu      sync.Mutex
+	comThreads = make(map[uint32]*comThreadState)
+)
+
+type comThreadState struct {
+	refs        int
+	initialized bool
+}
 
 // HresultError represents a failed HRESULT from a WASAPI/COM call.
 type HresultError struct {
@@ -36,16 +49,53 @@ func hresultErrorInt(op string, hr int32) error {
 
 // Init initializes COM on the current thread for WASAPI use.
 func Init() error {
+	tid := uint32(C.GetCurrentThreadId())
+	comMu.Lock()
+	if state := comThreads[tid]; state != nil {
+		state.refs++
+		comMu.Unlock()
+		return nil
+	}
+	comMu.Unlock()
+
 	hr := C.CoInitializeEx(nil, C.COINIT_MULTITHREADED)
-	if hr < 0 && uint32(hr) != 0x80010106 {
+	if hr < 0 {
+		if uint32(hr) == rpcEChangedMode {
+			storeCOMThreadState(tid, &comThreadState{refs: 1})
+			return nil
+		}
 		return hresultError("CoInitializeEx(MTA)", hr)
 	}
+	storeCOMThreadState(tid, &comThreadState{refs: 1, initialized: true})
 	return nil
 }
 
 // Uninit uninitializes COM on the current thread.
 func Uninit() {
-	C.CoUninitialize()
+	tid := uint32(C.GetCurrentThreadId())
+	comMu.Lock()
+	state := comThreads[tid]
+	if state == nil {
+		comMu.Unlock()
+		return
+	}
+	state.refs--
+	if state.refs > 0 {
+		comMu.Unlock()
+		return
+	}
+	delete(comThreads, tid)
+	comMu.Unlock()
+
+	if state.initialized {
+		C.CoUninitialize()
+	}
+}
+
+func storeCOMThreadState(tid uint32, state *comThreadState) {
+	comMu.Lock()
+	comThreads[tid] = state
+	comMu.Unlock()
 }
 
 // RunOnLockedThread runs fn on a locked OS thread with COM initialized.

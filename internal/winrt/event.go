@@ -92,6 +92,9 @@ func (h *EventHandler) Register(source unsafe.Pointer, addSlot, removeSlot int) 
 	if h.closed {
 		return fmt.Errorf("winrt: event handler is closed")
 	}
+	if source == nil {
+		return fmt.Errorf("winrt: event source is nil")
+	}
 	if h.registered {
 		return nil
 	}
@@ -99,34 +102,37 @@ func (h *EventHandler) Register(source unsafe.Pointer, addSlot, removeSlot int) 
 		return fmt.Errorf("winrt: event handler allocation failed")
 	}
 
-	h.source = source
-	h.addSlot = addSlot
-	h.removeSlot = removeSlot
-
 	fn := vtableFn(source, addSlot)
+	var token int64
 	r1, _, _ := syscall.SyscallN(fn,
 		uintptr(source),
 		uintptr(h.obj),
-		uintptr(unsafe.Pointer(&h.token)),
+		uintptr(unsafe.Pointer(&token)),
 	)
 	if int32(r1) < 0 {
 		return hresultErrorInt("add_EventHandler", int32(r1))
 	}
 
+	AddRef(source)
+	h.source = source
+	h.addSlot = addSlot
+	h.removeSlot = removeSlot
+	h.token = token
 	h.registered = true
 	return nil
 }
 
 // Unregister removes the event subscription.
 func (h *EventHandler) Unregister() error {
-	source, removeSlot, token, ok := h.takeRegistration()
+	source, addSlot, removeSlot, token, ok := h.takeRegistration()
 	if !ok {
 		return nil
 	}
 	if err := removeEventRegistration(source, removeSlot, token); err != nil {
-		h.restoreRegistration()
+		h.restoreRegistration(source, addSlot, removeSlot, token)
 		return err
 	}
+	Release(source)
 	return nil
 }
 
@@ -140,11 +146,16 @@ func (h *EventHandler) Close() error {
 	h.closed = true
 	source, removeSlot, token, registered := h.registrationLocked()
 	h.registered = false
+	h.source = nil
+	h.addSlot = 0
+	h.removeSlot = 0
+	h.token = 0
 	h.mu.Unlock()
 
 	var err error
 	if registered {
 		err = removeEventRegistration(source, removeSlot, token)
+		Release(source)
 	}
 
 	h.mu.Lock()
@@ -300,20 +311,29 @@ func (h *EventHandler) endInvoke() {
 	h.mu.Unlock()
 }
 
-func (h *EventHandler) takeRegistration() (unsafe.Pointer, int, int64, bool) {
+func (h *EventHandler) takeRegistration() (unsafe.Pointer, int, int, int64, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.registered {
-		return nil, 0, 0, false
+		return nil, 0, 0, 0, false
 	}
 	source, removeSlot, token, ok := h.registrationLocked()
+	addSlot := h.addSlot
 	h.registered = false
-	return source, removeSlot, token, ok
+	h.source = nil
+	h.addSlot = 0
+	h.removeSlot = 0
+	h.token = 0
+	return source, addSlot, removeSlot, token, ok
 }
 
-func (h *EventHandler) restoreRegistration() {
+func (h *EventHandler) restoreRegistration(source unsafe.Pointer, addSlot, removeSlot int, token int64) {
 	h.mu.Lock()
 	if !h.closed {
+		h.source = source
+		h.addSlot = addSlot
+		h.removeSlot = removeSlot
+		h.token = token
 		h.registered = true
 	}
 	h.mu.Unlock()

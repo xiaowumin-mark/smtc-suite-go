@@ -57,7 +57,7 @@ func (c *CaptureClient) NextPacketSize() (uint32, error) {
 	return frames, nil
 }
 
-func (c *CaptureClient) ReadPacket(format Format) (Packet, bool, error) {
+func (c *CaptureClient) ReadPacket(format Format) (packet Packet, ok bool, err error) {
 	if c == nil || c.ptr == nil {
 		return Packet{}, false, fmt.Errorf("capture client is closed")
 	}
@@ -86,8 +86,15 @@ func (c *CaptureClient) ReadPacket(format Format) (Packet, bool, error) {
 	if int32(r1) < 0 {
 		return Packet{}, false, hresultErrorInt("IAudioCaptureClient.GetBuffer", int32(r1))
 	}
+	defer func() {
+		if releaseErr := c.ReleaseBuffer(frames); releaseErr != nil && err == nil {
+			packet = Packet{}
+			ok = false
+			err = releaseErr
+		}
+	}()
 
-	packet := Packet{
+	packet = Packet{
 		Frames:         int(frames),
 		Flags:          flags,
 		DevicePosition: devicePosition,
@@ -95,15 +102,20 @@ func (c *CaptureClient) ReadPacket(format Format) (Packet, bool, error) {
 		Timestamp:      time.Now(),
 	}
 	if frames > 0 && dataPtr != nil && !packet.Silent() {
+		if format.BlockAlign <= 0 {
+			return Packet{}, false, fmt.Errorf("invalid block align: %d", format.BlockAlign)
+		}
+		if uint64(frames) > uint64(maxInt)/uint64(format.BlockAlign) {
+			return Packet{}, false, fmt.Errorf("packet byte size overflows int")
+		}
 		bytes := int(frames) * format.BlockAlign
 		packet.Data = append([]byte(nil), unsafe.Slice((*byte)(dataPtr), bytes)...)
 	}
 
-	if err := c.ReleaseBuffer(frames); err != nil {
-		return Packet{}, false, err
-	}
 	return packet, true, nil
 }
+
+const maxInt = int(^uint(0) >> 1)
 
 func (c *CaptureClient) ReleaseBuffer(frames uint32) error {
 	fn := vtableFn(c.ptr, slotIAudioCaptureClientReleaseBuffer)

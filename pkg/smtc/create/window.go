@@ -47,16 +47,16 @@ import (
 )
 
 type staThread struct {
-	ready  chan struct{}
-	err    error
-	done   chan struct{}
-	cmdCh  chan func()
+	ready chan struct{}
+	err   error
+	done  chan struct{}
+	cmdCh chan func()
+	once  sync.Once
 }
 
 var (
-	globalSTA     *staThread
-	globalSTAMu   sync.Mutex
-	globalSTAOnce sync.Once
+	globalSTA   *staThread
+	globalSTAMu sync.Mutex
 )
 
 func getSTAThread() (*staThread, error) {
@@ -66,36 +66,28 @@ func getSTAThread() (*staThread, error) {
 		globalSTAMu.Unlock()
 		return t, nil
 	}
-	globalSTAMu.Unlock()
-
-	var onceErr error
-	globalSTAOnce.Do(func() {
-		t := &staThread{
-			ready: make(chan struct{}),
-			done:  make(chan struct{}),
-			cmdCh: make(chan func()),
-		}
-		go t.run()
-		<-t.ready
-		if t.err != nil {
-			onceErr = t.err
-			return
-		}
-		globalSTAMu.Lock()
-		globalSTA = t
-		globalSTAMu.Unlock()
-	})
-	if onceErr != nil {
-		return nil, onceErr
+	t := &staThread{
+		ready: make(chan struct{}),
+		done:  make(chan struct{}),
+		cmdCh: make(chan func()),
 	}
-	return globalSTA, nil
+	go t.run()
+	<-t.ready
+	if t.err != nil {
+		globalSTAMu.Unlock()
+		return nil, t.err
+	}
+	globalSTA = t
+	globalSTAMu.Unlock()
+	return t, nil
 }
 
 func (t *staThread) run() {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	defer close(t.done)
 
-	hr := C.CoInitializeEx(nil, 2) // COINIT_APARTMENTTHREADED
+	hr := C.CoInitializeEx(nil, 2)          // COINIT_APARTMENTTHREADED
 	if uint32(hr) != 0 && uint32(hr) != 1 { // S_OK=0, S_FALSE=1
 		t.err = fmt.Errorf("CoInitializeEx(STA): 0x%08X", uint32(hr))
 		close(t.ready)
@@ -140,26 +132,50 @@ func (t *staThread) run() {
 
 	C.DestroyWindow(C.smtcGetWindow())
 	C.CoUninitialize()
-	close(t.done)
 }
 
 // Do dispatches a function to the STA thread and blocks until complete.
 func (t *staThread) Do(fn func()) {
+	if t == nil || fn == nil {
+		return
+	}
 	done := make(chan struct{})
-	t.cmdCh <- func() {
+	select {
+	case t.cmdCh <- func() {
 		fn()
 		close(done)
+	}:
+		C.smtcWakeSTA() // wake up the pump to process the command
+	case <-t.done:
+		return
 	}
-	C.smtcWakeSTA() // wake up the pump to process the command
-	<-done
+	select {
+	case <-done:
+	case <-t.done:
+	}
 }
 
 // Shutdown stops the message pump.
 func (t *staThread) Shutdown() {
-	t.cmdCh <- func() {
-		C.smtcQuitPump()
+	if t == nil {
+		return
 	}
-	<-t.done
+	t.once.Do(func() {
+		select {
+		case t.cmdCh <- func() {
+			C.smtcQuitPump()
+		}:
+			C.smtcWakeSTA()
+		case <-t.done:
+		}
+		<-t.done
+
+		globalSTAMu.Lock()
+		if globalSTA == t {
+			globalSTA = nil
+		}
+		globalSTAMu.Unlock()
+	})
 }
 
 // HWND returns the window handle.
